@@ -1,0 +1,157 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;600;700;800&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Outfit", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+:root {
+  color: #18181b;
+  background: #fafaf9;
+  font-family: var(--font-sans);
+  text-rendering: geometricPrecision;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background:
+    linear-gradient(90deg, rgba(24, 24, 27, 0.035) 1px, transparent 1px),
+    linear-gradient(rgba(24, 24, 27, 0.025) 1px, transparent 1px),
+    #fafaf9;
+  background-size: 48px 48px;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+.label {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #71717a;
+}
+
+.input {
+  border: 1px solid #d4d4d8;
+  background: #ffffff;
+  color: #18181b;
+  padding: 0.72rem 0.85rem;
+  font-size: 0.9rem;
+  outline: none;
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.input:focus {
+  border-color: #18181b;
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.18);
+}
+
+.btn-primary,
+.btn-ghost,
+.nav-btn,
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  border: 1px solid #18181b;
+  min-height: 2.45rem;
+  padding: 0.55rem 0.85rem;
+  font-size: 0.78rem;
+  font-weight: 800;
+  transition: transform 160ms ease, background 160ms ease, color 160ms ease, border-color 160ms ease;
+}
+
+.btn-primary {
+  background: #18181b;
+  color: #ffffff;
+}
+
+.btn-primary:hover {
+  background: #27272a;
+}
+
+.btn-ghost,
+.nav-btn,
+.icon-btn {
+  background: #ffffff;
+  color: #18181b;
+  border-color: #d4d4d8;
+}
+
+.btn-ghost:hover,
+.nav-btn:hover,
+.icon-btn:hover {
+  border-color: #18181b;
+}
+
+.nav-btn {
+  min-height: 2.2rem;
+  text-transform: capitalize;
+}
+
+.nav-btn-active {
+  background: #18181b;
+  color: #ffffff;
+  border-color: #18181b;
+}
+
+.icon-btn {
+  width: 2.35rem;
+  padding-inline: 0;
+}
+
+.btn-primary:active,
+.btn-ghost:active,
+.nav-btn:active,
+.icon-btn:active {
+  transform: translateY(1px);
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #bbf7d0;
+  background: #ecfdf5;
+  color: #065f46;
+  padding: 0.24rem 0.48rem;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f4f4f5;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #a1a1aa;
+  border: 3px solid #f4f4f5;
+}

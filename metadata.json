@@ -1,0 +1,6 @@
+{
+  "name": "LetsDOiT",
+  "description": "An offline-first hybrid AI teaching and learning assistant with offline/online modes, course management, quizzes, and learning analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
