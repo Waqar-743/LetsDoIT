@@ -259,6 +259,14 @@ fn is_allowed_proxy_url(url: &str) -> Result<(), String> {
         return Ok(());
     }
 
+    // Google AI Studio / Generative Language API (free Gemma fallback)
+    if host == "generativelanguage.googleapis.com"
+        || host == "googleapis.com"
+        || host.ends_with(".googleapis.com")
+    {
+        return Ok(());
+    }
+
     // Local offline runtime / loopback
     if host == "localhost"
         || host == "127.0.0.1"
@@ -280,8 +288,16 @@ fn is_allowed_proxy_url(url: &str) -> Result<(), String> {
         return Ok(());
     }
 
+    // GitHub releases (offline llama.cpp runtime)
+    if host == "github.com"
+        || host == "objects.githubusercontent.com"
+        || host.ends_with(".githubusercontent.com")
+    {
+        return Ok(());
+    }
+
     Err(format!(
-        "HTTP proxy blocked host \"{host}\". Allowed: openrouter.ai, huggingface.co, localhost."
+        "HTTP proxy blocked host \"{host}\". Allowed: openrouter.ai, googleapis.com, huggingface.co, github.com, localhost."
     ))
 }
 
@@ -842,6 +858,138 @@ fn llama_server_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(runtime_dir(app)?.join("llama-server.exe"))
 }
 
+#[tauri::command]
+fn open_models_folder(app: AppHandle) -> Result<String, String> {
+    let dir = models_dir(&app)?;
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer")
+            .arg(dir.as_os_str())
+            .spawn()
+            .map_err(|e| format!("Could not open models folder: {e}"))?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = Command::new("xdg-open").arg(&dir).spawn();
+    }
+    Ok(dir.to_string_lossy().to_string())
+}
+
+/// Copy a user-selected GGUF into the app models folder (manual offline install).
+#[tauri::command]
+fn import_local_gguf(app: AppHandle, source_path: String) -> Result<DownloadResult, String> {
+    let src = PathBuf::from(source_path.trim());
+    if !src.exists() {
+        return Ok(DownloadResult {
+            ok: false,
+            message: format!("File not found:\n{}", src.to_string_lossy()),
+            path: None,
+            name: None,
+        });
+    }
+    let name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("model.gguf")
+        .to_string();
+    if !name.to_ascii_lowercase().ends_with(".gguf") {
+        return Ok(DownloadResult {
+            ok: false,
+            message: "Only .gguf model files can be imported for offline use.".into(),
+            path: None,
+            name: None,
+        });
+    }
+
+    // Verify GGUF magic
+    {
+        let mut probe =
+            fs::File::open(&src).map_err(|e| format!("Cannot read file: {e}"))?;
+        let mut magic = [0u8; 4];
+        probe
+            .read_exact(&mut magic)
+            .map_err(|_| "File is empty or unreadable.".to_string())?;
+        if &magic != b"GGUF" {
+            return Ok(DownloadResult {
+                ok: false,
+                message: format!(
+                    "Not a GGUF model (magic {:?}). Download a .gguf from Hugging Face.",
+                    String::from_utf8_lossy(&magic)
+                ),
+                path: None,
+                name: None,
+            });
+        }
+    }
+
+    let dest_dir = models_dir(&app)?;
+    let dest = dest_dir.join(&name);
+    fs::copy(&src, &dest).map_err(|e| format!("Failed to copy model into app folder: {e}"))?;
+    let size = fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+
+    Ok(DownloadResult {
+        ok: true,
+        message: format!(
+            "Model imported for offline use.\nFile: {name}\nSize: {}\nPath: {}",
+            format_bytes(size),
+            dest.to_string_lossy()
+        ),
+        path: Some(dest.to_string_lossy().to_string()),
+        name: Some(name),
+    })
+}
+
+/// Register an existing GGUF path without copying (e.g. user keeps models on D:).
+#[tauri::command]
+fn register_external_gguf(path: String) -> Result<DownloadResult, String> {
+    let src = PathBuf::from(path.trim());
+    if !src.exists() {
+        return Ok(DownloadResult {
+            ok: false,
+            message: format!("File not found:\n{}", src.to_string_lossy()),
+            path: None,
+            name: None,
+        });
+    }
+    let name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("model.gguf")
+        .to_string();
+    if !name.to_ascii_lowercase().ends_with(".gguf") {
+        return Ok(DownloadResult {
+            ok: false,
+            message: "Path must point to a .gguf file.".into(),
+            path: None,
+            name: None,
+        });
+    }
+    let mut probe = fs::File::open(&src).map_err(|e| format!("Cannot read file: {e}"))?;
+    let mut magic = [0u8; 4];
+    probe
+        .read_exact(&mut magic)
+        .map_err(|_| "File is empty or unreadable.".to_string())?;
+    if &magic != b"GGUF" {
+        return Ok(DownloadResult {
+            ok: false,
+            message: "File is not a valid GGUF model.".into(),
+            path: None,
+            name: None,
+        });
+    }
+    let size = fs::metadata(&src).map(|m| m.len()).unwrap_or(0);
+    Ok(DownloadResult {
+        ok: true,
+        message: format!(
+            "External GGUF registered.\nFile: {name}\nSize: {}\nPath: {}",
+            format_bytes(size),
+            src.to_string_lossy()
+        ),
+        path: Some(src.to_string_lossy().to_string()),
+        name: Some(name),
+    })
+}
+
 async fn ensure_llama_server_binary(app: &AppHandle) -> Result<PathBuf, String> {
     let bin = llama_server_path(app)?;
     if bin.exists() {
@@ -1008,6 +1156,13 @@ async fn ensure_offline_runtime(app: AppHandle, model_path: String) -> Result<Of
     let bin = ensure_llama_server_binary(&app).await?;
     let endpoint = format!("http://127.0.0.1:{OFFLINE_PORT}");
 
+    let log_path = runtime_dir(&app)?.join("llama-server.log");
+    let log_file = fs::File::create(&log_path)
+        .map_err(|e| format!("Cannot create runtime log: {e}"))?;
+    let log_err = log_file
+        .try_clone()
+        .map_err(|e| format!("Cannot clone runtime log handle: {e}"))?;
+
     let mut cmd = Command::new(&bin);
     cmd.arg("-m")
         .arg(&path)
@@ -1019,8 +1174,8 @@ async fn ensure_offline_runtime(app: AppHandle, model_path: String) -> Result<Of
         .arg("4096")
         .arg("-ngl")
         .arg("0")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_err));
 
     #[cfg(target_os = "windows")]
     {
@@ -1031,7 +1186,8 @@ async fn ensure_offline_runtime(app: AppHandle, model_path: String) -> Result<Of
 
     let child = cmd.spawn().map_err(|e| {
         format!(
-            "Failed to start offline runtime.\n\n{e}\n\nBinary: {}",
+            "Failed to start offline runtime.\n\n{e}\n\nBinary: {}\n\n\
+             If download of the runtime failed earlier, reinstall the app or check internet once.",
             bin.to_string_lossy()
         )
     })?;
@@ -1042,18 +1198,37 @@ async fn ensure_offline_runtime(app: AppHandle, model_path: String) -> Result<Of
         state.model_path = Some(path.clone());
     }
 
-    let ready = wait_for_runtime(&endpoint, 90_000).await;
+    let ready = wait_for_runtime(&endpoint, 120_000).await;
     if !ready {
         let mut state = OFFLINE_RUNTIME.lock();
         stop_runtime_locked(&mut state);
+        let log_tail = fs::read_to_string(&log_path)
+            .unwrap_or_default()
+            .chars()
+            .rev()
+            .take(1500)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
         return Ok(OfflineRuntimeStatus {
             running: false,
             endpoint,
             model_path: Some(path.to_string_lossy().to_string()),
-            message:
+            message: format!(
                 "Offline engine started but did not become ready in time.\n\
-                 The GGUF may be too large for this machine, or the runtime failed to load it."
-                    .into(),
+                 Model: {}\n\
+                 Tips: use a smaller Q4 GGUF (2B), free ~4GB RAM, or re-download the model.\n\n\
+                 Runtime log (tail):\n{}",
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("model.gguf"),
+                if log_tail.trim().is_empty() {
+                    "(empty — process may have crashed immediately)"
+                } else {
+                    log_tail.trim()
+                }
+            ),
         });
     }
 
@@ -1196,6 +1371,9 @@ pub fn run() {
             resolve_hf_model_target,
             download_hf_model,
             list_local_gguf_models,
+            open_models_folder,
+            import_local_gguf,
+            register_external_gguf,
             ensure_offline_runtime,
             stop_offline_runtime,
             offline_runtime_status,

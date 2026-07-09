@@ -38,6 +38,16 @@ export interface Course {
   enrolledStudentIds: string[];
 }
 
+/** One RAG-style chunk of extracted course document text. */
+export interface DocumentChunk {
+  id: string;
+  index: number;
+  text: string;
+  /** e.g. "Page 3" or "Section 1" */
+  sourceRef: string;
+  charCount: number;
+}
+
 export interface CourseMaterial {
   id: string;
   courseId: string;
@@ -49,12 +59,15 @@ export interface CourseMaterial {
   contentSummary: string;
   topic?: string;
   contentText?: string;
+  /** Extracted document chunks for grounded AI summary / quiz generation */
+  chunks?: DocumentChunk[];
   importantPoints?: string[];
   studyHelp?: string;
   lessonMap?: LessonMapItem[];
   contentHash?: string;
   aiProcessed?: boolean;
   extractWarning?: string;
+  pageCount?: number;
 }
 
 export interface LessonMapItem {
@@ -68,7 +81,7 @@ export interface Quiz {
   courseId: string;
   title: string;
   sourceMaterialId: string;
-  difficulty: 'easy' | 'medium' | 'hard';
+  difficulty: 'easy' | 'medium' | 'moderate' | 'hard';
   questionType: 'MCQ' | 'Short' | 'True/False' | 'Mixed';
   timeLimit: number; // in minutes
   isTestMode: boolean; // True = Official Test, False = Practice Quiz
@@ -187,7 +200,7 @@ export interface PracticeSet {
   basedOnAttemptId: string;
   generatedAt: string;
   focusTopics: string[];
-  difficulty: 'easy' | 'medium' | 'hard';
+  difficulty: 'easy' | 'medium' | 'moderate' | 'hard';
   targetMistakeTypes: MistakeType[];
   description: string;
   questions: PracticeQuestion[];

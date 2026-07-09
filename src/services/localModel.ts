@@ -185,6 +185,41 @@ export async function testOfflineHfModel(modelPath: string): Promise<{ ok: boole
   }
 }
 
+export async function openModelsFolder(): Promise<string> {
+  requireDesktop();
+  return invoke<string>('open_models_folder');
+}
+
+export async function importLocalGguf(sourcePath: string): Promise<{
+  ok: boolean;
+  message: string;
+  path?: string;
+  name?: string;
+}> {
+  requireDesktop();
+  try {
+    return await invoke('import_local_gguf', { sourcePath });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return { ok: false, message: msg };
+  }
+}
+
+export async function registerExternalGguf(path: string): Promise<{
+  ok: boolean;
+  message: string;
+  path?: string;
+  name?: string;
+}> {
+  requireDesktop();
+  try {
+    return await invoke('register_external_gguf', { path });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return { ok: false, message: msg };
+  }
+}
+
 export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;

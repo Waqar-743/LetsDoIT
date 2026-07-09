@@ -47,6 +47,12 @@ export function toProxiedUrl(url: string): string {
       return `/__proxy/openrouter${parsed.pathname}${parsed.search}`;
     }
     if (
+      parsed.hostname === 'generativelanguage.googleapis.com' ||
+      parsed.hostname.endsWith('.googleapis.com')
+    ) {
+      return `/__proxy/googleai${parsed.pathname}${parsed.search}`;
+    }
+    if (
       (parsed.hostname === 'localhost' ||
         parsed.hostname === '127.0.0.1' ||
         parsed.hostname === '[::1]') &&

@@ -6,7 +6,28 @@
 
 **Hybrid Offline / Online Classroom AI — built for real classrooms, not demo slides.**
 
+<br />
+
+[![Release](https://img.shields.io/github/v/release/Waqar-743/LetsDoIT?style=flat-square)](https://github.com/Waqar-743/LetsDoIT/releases)
+[![License](https://img.shields.io/badge/license-project%20owner-lightgrey?style=flat-square)](#license)
+[![Platform](https://img.shields.io/badge/platform-Windows%20x64-0078D6?style=flat-square&logo=windows)](https://github.com/Waqar-743/LetsDoIT/releases)
+
 </div>
+
+---
+
+## Download (Windows)
+
+Install the latest desktop build from **GitHub Releases** (no Node/Rust required for end users):
+
+| Package | File | Use when |
+|---------|------|----------|
+| **NSIS setup** (recommended) | `LetsDoIT_0.1.0_x64-setup.exe` | Standard Windows install wizard |
+| **MSI** | `LetsDoIT_0.1.0_x64_en-US.msi` | Managed / enterprise install |
+
+→ **[Latest release & installers](https://github.com/Waqar-743/LetsDoIT/releases/latest)**
+
+After install, open **LetsDoIT Classroom**, then configure Online and/or Offline AI under the **Model** tab.
 
 ---
 
@@ -18,9 +39,9 @@
 
 So the product goal became personal and practical:
 
-- **Teachers** should upload notes, issue quizzes, and see who’s enrolled — without fighting five separate tools.
-- **Students** should join a course with a short code, open materials, and ask an AI tutor that still works **offline**.
-- **AI** should be real Gemma inference — not scripted placeholder text — with a clear path between **Online (OpenRouter)** and **Offline (Ollama)**.
+- **Teachers** upload notes/PDFs, issue quizzes, and track enrollment — without five separate tools.
+- **Students** join with a 4-digit code, open materials, ask a real AI tutor, and practice with quizzes grounded in **their** documents.
+- **AI** is real inference — **not** scripted dummy text — with a clear path between **Online (OpenRouter + free Google AI Studio fallback)** and **Offline (local Hugging Face GGUF)**.
 
 The name is a promise: stop waiting for perfect connectivity. **Let’s do it** with a hybrid classroom assistant that respects the network you actually have.
 
@@ -28,66 +49,72 @@ The name is a promise: stop waiting for perfect connectivity. **Let’s do it** 
 
 ## What LetsDoIT is
 
-LetsDoIT is an **offline-first hybrid AI classroom app** with two portals under one roof:
+LetsDoIT is an **offline-first hybrid AI classroom desktop app** with two portals under one roof:
 
 | Portal | Who it’s for | What they can do |
 |--------|----------------|------------------|
-| **Teacher** | Instructors & lab staff | Create courses, share 4‑digit join codes, upload materials (PDF & more), generate quizzes, monitor activity |
-| **Student** | Learners | Join courses, browse materials, chat with Gemma, practice quizzes, track preparation |
+| **Teacher** | Instructors & lab staff | Create courses, share 4‑digit join codes, upload PDFs/notes, **Summarize with Model**, generate real AI quizzes, monitor activity |
+| **Student** | Learners | Join courses, see live material updates, **Document Summary**, **Practice Quiz** (easy / moderate / hard), RAG chat, save quiz scores |
 
 Under the hood, a single **Auto Gemma Router** chooses the right path:
 
 ```text
-                ┌─────────────────────┐
-                │   AutoGemmaRouter   │
-                └──────────┬──────────┘
-           ONLINE          │          OFFLINE
-    OpenRouter Gemma  ◄────┼────►  Local Ollama Gemma
-  (free / hosted models)   │     (localhost:11434)
-                           │
-                      HYBRID mode
+                    ┌──────────────────────┐
+                    │   AutoGemmaRouter    │
+                    └──────────┬───────────┘
+           ONLINE              │              OFFLINE
+   OpenRouter free Gemma  ◄────┼────►  Local HF GGUF (llama-server)
+   + Google AI Studio          │      managed offline runtime
+   free failover               │
+                          HYBRID mode
               online first → offline fallback
 ```
+
+**RAG (Retrieve-Augmented Generation)** runs on extracted document chunks before answering or generating quizzes, so responses stay grounded in uploaded course material.
 
 ---
 
 ## Why it matters (the classroom reality)
 
-<div align="center">
-
 | Challenge | How LetsDoIT responds |
 |-----------|------------------------|
-| Unstable campus internet | Offline mode via **Ollama + local Gemma** |
-| Cloud cost & API lock-in | Free OpenRouter Gemma models + local fallback |
+| Unstable campus internet | Offline mode via **Hugging Face GGUF** on disk (no Ollama required) |
+| Cloud rate limits (HTTP 429) | Primary → backup → tertiary free Gemma + **Google AI Studio** free path |
 | Tools scattered across apps | Teacher + student portals in **one desktop app** |
-| Materials never reach the AI | PDF text extraction → course-aware chat & quizzes |
-| “AI demo” that can’t be tested | Built-in **Test Online / Test Offline** connection checks |
-
-</div>
+| Materials never reach the AI | PDF extract → **chunk** → store with course → RAG chat & quizzes |
+| Dummy “AI” demos | Template quizzes disabled; generation requires a real model |
+| Teacher uploads invisible to students | Shared classroom store (disk + localStorage) with live refresh + notice banner |
 
 ---
 
 ## Feature map
 
-### For teachers
+### Teachers
 - Create and manage courses with **4-digit join codes**
-- Upload lecture material (PDF and related classroom files)
-- Generate and manage quizzes from course content
-- View enrolled students and basic learning activity
-- Configure online / offline AI in the Model settings panel
+- Upload lecture material (PDF, notes, related files)
+- Automatic **text extraction + chunking** on upload
+- **Summarize with Model** — real summary, important points, study help
+- Generate **draft quizzes from document chunks** (AI, not templates)
+- Review / edit / publish quizzes; view enrollment and weak topics
+- Configure Online / Offline / Hybrid AI in **Model** settings
 
-### For students
+### Students
 - Sign in and **join classes with a course code**
-- Browse syllabus materials and open them for study
-- Chat with a **Gemma teaching assistant** (course-aware)
-- Attempt quizzes & practice sets; review mistakes with AI help
+- Automatically receive **new and updated materials** for joined courses
+- **Document Summary** and **Practice Quiz** from real document chunks
+- Choose quiz difficulty: **easy · moderate · hard**
+- Attempt quizzes; scores and diagnosis save to the dashboard
+- Personalized **AI practice sets** after mistakes (grounded in material)
+- Chat with a course-aware tutor using **RAG passages**
 - Prefer **English** or **Urdu–English** explanation style
 
-### For the AI layer
-- **Online:** OpenRouter `chat/completions` with Gemma (primary + backup model IDs)
-- **Offline:** Ollama local chat API (`http://localhost:11434`)
-- **Hybrid:** try online first, fall back to local when the cloud fails
-- Connection tests, model download (Ollama pull), and desktop-side HTTP proxy so the WebView never dies on CORS
+### AI layer
+- **Online:** OpenRouter `chat/completions` (free Gemma models) with full raw error reporting, 429 retry, multi-model failover
+- **Alternate free online:** Google AI Studio (Gemma / free models) when OpenRouter is rate-limited
+- **Offline:** Download or **manually import** Hugging Face GGUF; app runs a local inference engine
+- **Hybrid:** online first, then local GGUF
+- Connection tests for OpenRouter, Google AI, and offline runtime
+- Desktop **Rust HTTP proxy** (no WebView CORS issues)
 
 ---
 
@@ -98,31 +125,43 @@ Under the hood, a single **Auto Gemma Router** chooses the right path:
 | UI | React 19, TypeScript, Tailwind CSS 4 |
 | Desktop shell | Tauri 2 (Rust) |
 | Build | Vite 6 |
-| Online AI | OpenRouter → Gemma free models |
-| Offline AI | Ollama → local Gemma models |
-| Persistence | Desktop app data dir (JSON) + browser `localStorage` fallback |
-| PDF text | `pdfjs-dist` client extraction |
+| Online AI | OpenRouter free Gemma + Google AI Studio fallback |
+| Offline AI | Hugging Face GGUF + managed local `llama-server` |
+| Persistence | Shared classroom JSON in app data dir + `localStorage` |
+| PDF / RAG | `pdfjs-dist` extraction, chunk index, lexical retrieval (`rag.ts`) |
 
 **Default models**
 
-| Mode | Model |
-|------|--------|
+| Mode | Model / path |
+|------|----------------|
 | Online primary | `google/gemma-4-26b-a4b-it:free` |
 | Online backup | `google/gemma-4-31b-it:free` |
-| Offline default | `gemma2:2b` (pull more from Model settings) |
+| Online tertiary / failover | Free OpenRouter Gemma chain |
+| Google AI Studio default | `gemma-3-27b-it` (and smaller fallbacks) |
+| Offline preset | `gemma-2-2b-it-Q4_K_M.gguf` (public GGUF repo) |
 
 ---
 
 ## Quick start
 
-### Prerequisites
+### End users (Windows)
+
+1. Download the installer from [Releases](https://github.com/Waqar-743/LetsDoIT/releases/latest).
+2. Run `LetsDoIT_0.1.0_x64-setup.exe` (or the MSI).
+3. Open the app → **Model** tab → add OpenRouter key and/or offline GGUF.
+4. Teacher: create course → upload PDF. Student: join with code → Materials.
+
+### Developers
+
+**Prerequisites**
 
 - **Node.js** 20+ and npm  
 - **Rust** toolchain (for Tauri desktop builds)  
-- Optional: **Ollama** for offline Gemma — [https://ollama.com](https://ollama.com)  
-- Optional: **OpenRouter API key** for online Gemma — [https://openrouter.ai](https://openrouter.ai)
+- Optional: **OpenRouter API key** — [https://openrouter.ai](https://openrouter.ai)  
+- Optional: **Google AI Studio key** — [https://aistudio.google.com/apikey](https://aistudio.google.com/apikey)  
+- Optional: Hugging Face token only for **gated** GGUF models  
 
-### Clone
+**Clone**
 
 ```bash
 git clone https://github.com/Waqar-743/LetsDoIT.git
@@ -130,27 +169,28 @@ cd LetsDoIT
 npm install
 ```
 
-### Run (web / Vite)
+**Web / Vite (browser preview)**
 
 ```bash
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
+Open [http://localhost:3000](http://localhost:3000).  
+Offline GGUF download requires the **desktop** build.
 
-### Run (desktop)
+**Desktop (dev)**
 
 ```bash
 npm run desktop:dev
 ```
 
-### Production desktop build
+**Production desktop build**
 
 ```bash
 npm run desktop:build
 ```
 
-Artifacts land under:
+Artifacts:
 
 ```text
 src-tauri/target/release/letsdoit.exe
@@ -165,26 +205,58 @@ src-tauri/target/release/bundle/msi/LetsDoIT_0.1.0_x64_en-US.msi
 ### 1. Online — OpenRouter
 
 1. Create a key at [openrouter.ai](https://openrouter.ai) (starts with `sk-or-...`).
-2. In the app → **Model** settings → paste the key.
-3. Confirm base URL: `https://openrouter.ai/api/v1`
+2. In the app → **Model** → paste the key.
+3. Base URL: `https://openrouter.ai/api/v1`
 4. Click **Test Online Model**.
 
-Desktop builds call OpenRouter through a **Rust HTTP proxy** (no WebView CORS drama). Browser dev uses a Vite proxy (`/__proxy/openrouter`).
+On **HTTP 429** / “Provider returned error”, the app shows the **full raw error**, retries with backoff, then fails over across free Gemma model IDs.
 
-### 2. Offline — Hugging Face (no Ollama)
+### 2. Free alternate online — Google AI Studio
 
-Offline mode does **not** use Ollama. You download a **GGUF** model from Hugging Face onto this PC:
+1. Create a free key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
+2. Paste it under **Google AI Studio** in Model settings.
+3. Click **Test Google AI**.
 
-1. Open **Model** settings in the desktop app.
-2. Paste a Hugging Face link (or pick a preset), e.g.  
+ONLINE / HYBRID will use this path automatically when OpenRouter free capacity is exhausted.
+
+### 3. Offline — Hugging Face GGUF (no Ollama)
+
+1. Open **Model** in the **desktop** app.
+2. Paste a GGUF repo link (or pick a preset), e.g.  
    `https://huggingface.co/bartowski/gemma-2-2b-it-GGUF`
-3. Click **Download from Hugging Face** (optional HF token only for gated models).
-4. Click **Test Offline Model** — LetsDoIT starts a local engine automatically.
-5. After that, chat works **fully offline** from the file on disk.
+3. **Download from Hugging Face**, or if download fails:
+   - Download the `.gguf` in a browser
+   - **Open models folder** / paste absolute path → **Import into app folder** or **Register path**
+4. Click **Test Offline Model**.
 
-### 3. Hybrid
+### 4. Hybrid
 
-Pick **HYBRID** in the assistant mode control: online when available, local Hugging Face model when not.
+Pick **HYBRID** in the assistant: online when available, local GGUF when not.
+
+---
+
+## Classroom end-to-end flow
+
+```text
+Teacher
+  → creates course (4-digit code)
+  → uploads PDF / notes
+  → app extracts text, chunks document, stores with course
+  → Summarize with Model (real AI summary + points)
+  → optional: generate quiz draft from chunks → publish
+
+Student
+  → joins with course code
+  → sees materials (live sync + update banner)
+  → Document Summary (RAG + model)
+  → Practice Quiz (easy / moderate / hard) from real chunks
+  → attempts quiz → score saved on dashboard
+  → AI practice set from mistakes (not dummy templates)
+  → chats with tutor grounded in retrieved passages
+
+Teacher
+  → sees enrollment, attempts, weak topics
+```
 
 ---
 
@@ -192,45 +264,26 @@ Pick **HYBRID** in the assistant mode control: online when available, local Hugg
 
 ```text
 LetsDoIT/
-├── assets/img/app-icon.svg     # Brand icon used in this README
+├── assets/img/app-icon.svg
 ├── src/
-│   ├── App.tsx                 # App shell, portals, model panel
-│   ├── components/             # Auth, student & teacher dashboards
+│   ├── App.tsx                 # Portals, materials, quizzes, model panel
+│   ├── components/             # Auth & dashboard UI pieces
 │   ├── services/
-│   │   ├── ai.ts               # OpenRouter + Ollama + Auto router
-│   │   ├── http.ts             # robustFetch (Tauri proxy / Vite proxy)
+│   │   ├── ai.ts               # OpenRouter, Google AI, offline, quiz/summary AI
+│   │   ├── rag.ts              # Chunk retrieval for grounded answers
+│   │   ├── classroomStore.ts   # Shared teacher↔student persistence + sync
+│   │   ├── http.ts             # robustFetch (Tauri / Vite proxy)
+│   │   ├── localModel.ts       # HF download, import, offline runtime
 │   │   ├── desktop.ts          # Tauri invoke helpers
-│   │   └── pdf.ts              # Material text extraction
+│   │   └── pdf.ts              # PDF/text extraction + chunking
 │   └── types.ts
 ├── src-tauri/
-│   ├── src/lib.rs              # Desktop storage + HTTP proxy commands
+│   ├── src/lib.rs              # Storage, HTTP proxy, HF download, offline engine
 │   ├── icons/icon.ico
 │   └── tauri.conf.json
 ├── package.json
 └── vite.config.ts
 ```
-
----
-
-## End-to-end classroom flow
-
-```text
-Teacher logs in
-    → creates a course (4-digit code)
-    → uploads PDF / notes
-    → (optional) generates quiz with Gemma
-
-Student logs in
-    → enters course code → course appears
-    → opens materials
-    → chats with Gemma (online / offline / hybrid)
-    → practices quizzes · reviews mistakes
-
-Teacher
-    → sees enrollment & activity
-```
-
-That loop is the product. Everything else is scaffolding around it.
 
 ---
 
@@ -247,14 +300,14 @@ That loop is the product. Everything else is scaffolding around it.
 
 ---
 
-## Roadmap (honest)
+## Roadmap
 
-- Stronger multi-device sync / shared backend when labs need a server  
-- Richer analytics for teachers beyond local activity  
-- More offline model providers (llama.cpp / mistral.rs paths)  
-- Polished packaging icons & auto-update channel  
+- Stronger multi-device / multi-PC cloud sync for lab servers  
+- Richer teacher analytics beyond local activity  
+- Optional OCR for scanned PDFs  
+- Auto-update channel for installers  
 
-This is an active classroom product, not a frozen showcase. Contributions and harsh feedback from real campuses are welcome.
+This is an active classroom product, not a frozen showcase. Contributions and feedback from real campuses are welcome.
 
 ---
 

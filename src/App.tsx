@@ -43,18 +43,32 @@ import {
 } from './types';
 import {
   AISettings,
-  AutoGemmaRouter,
+  answerWithRag,
   createLessonMap,
   DEFAULT_AI_SETTINGS,
   diagnoseOfflineMistake,
-  generateOfflineQuiz,
-  generatePracticeSet,
+  generatePracticeSetWithAI,
+  generateQuizWithAI,
   hashContent,
   loadAISettings,
   processMaterialWithAI,
   saveAISettings,
+  testGoogleAiConnection,
   testOpenRouterConnection,
 } from './services/ai';
+import {
+  loadClassroomSnapshot,
+  persistAttempts,
+  persistCourses,
+  persistLogs,
+  persistMaterials,
+  persistPracticeSets,
+  persistQuizzes,
+  persistStudent,
+  persistTeacher,
+  reloadSharedClassroom,
+  stableEqual,
+} from './services/classroomStore';
 import {
   DesktopEnvironment,
   getDesktopEnvironment,
@@ -66,12 +80,15 @@ import {
   downloadHfModel,
   formatBytes,
   HF_GEMMA_PRESETS,
+  importLocalGguf,
   listLocalGgufModels,
+  openModelsFolder,
+  registerExternalGguf,
   stopOfflineRuntime,
   testOfflineHfModel,
   type LocalGgufModel,
 } from './services/localModel';
-import { extractTextFromFile } from './services/pdf';
+import { chunkDocumentText, extractTextFromFile } from './services/pdf';
 import {
   INITIAL_ATTEMPTS,
   INITIAL_COURSES,
@@ -84,8 +101,6 @@ import {
 type Screen = 'auth' | 'student' | 'teacher';
 type StudentTab = 'overview' | 'courses' | 'materials' | 'assistant' | 'quizzes' | 'practice' | 'profile' | 'model';
 type TeacherTab = 'overview' | 'courses' | 'materials' | 'quizzes' | 'analytics' | 'assistant' | 'model';
-
-const router = new AutoGemmaRouter();
 
 const nowStamp = () => new Date().toISOString().replace('T', ' ').slice(0, 16);
 
@@ -205,61 +220,130 @@ function scoreShortAnswer(answer: string, correct: string) {
   return correctTokens.some((word) => answerTokens.has(word)) || answer.length > 40;
 }
 
+const defaultTeacher: TeacherProfile = {
+  id: 't1',
+  name: 'Prof. Dr. Tariq Shah',
+  email: 'tariq.shah@nutech.edu.pk',
+  isApproved: true,
+  department: 'Computer Science',
+};
+
+const defaultMaterials: CourseMaterial[] = INITIAL_MATERIALS.map((m) => ({
+  ...m,
+  topic: m.title.split(':')[0],
+  lessonMap: createLessonMap(m),
+  chunks: chunkDocumentText(m.contentSummary || m.title),
+}));
+
 function App() {
-  const [role, setRole] = useStoredState<UserRole>('letsdoit_role_v2', null);
-  const [student, setStudent] = useStoredState<StudentProfile>('letsdoit_student_v2', INITIAL_STUDENT_PROFILE);
-  const [teacher, setTeacher] = useStoredState<TeacherProfile>('letsdoit_teacher_v2', {
-    id: 't1',
-    name: 'Prof. Dr. Tariq Shah',
-    email: 'tariq.shah@nutech.edu.pk',
-    isApproved: true,
-    department: 'Computer Science',
-  });
-  const [courses, setCourses] = useStoredState<Course[]>('letsdoit_courses_v2', INITIAL_COURSES);
-  const [materials, setMaterials] = useStoredState<CourseMaterial[]>('letsdoit_materials_v2', INITIAL_MATERIALS.map((m) => ({
-    ...m,
-    topic: m.title.split(':')[0],
-    lessonMap: createLessonMap(m),
-  })));
-  const [quizzes, setQuizzes] = useStoredState<Quiz[]>('letsdoit_quizzes_v2', INITIAL_QUIZZES);
-  const [attempts, setAttempts] = useStoredState<QuizAttempt[]>('letsdoit_attempts_v2', INITIAL_ATTEMPTS);
-  const [practiceSets, setPracticeSets] = useStoredState<PracticeSet[]>('letsdoit_practice_v1', []);
-  const [logs, setLogs] = useStoredState<SystemLog[]>('letsdoit_logs_v2', INITIAL_SYSTEM_LOGS);
+  const [role, setRole] = useStoredState<UserRole>('letsdoit_role_v3', null);
+  const [student, setStudent] = useState<StudentProfile>(INITIAL_STUDENT_PROFILE);
+  const [teacher, setTeacher] = useState<TeacherProfile>(defaultTeacher);
+  const [courses, setCourses] = useState<Course[]>(INITIAL_COURSES);
+  const [materials, setMaterials] = useState<CourseMaterial[]>(defaultMaterials);
+  const [quizzes, setQuizzes] = useState<Quiz[]>([]);
+  const [attempts, setAttempts] = useState<QuizAttempt[]>([]);
+  const [practiceSets, setPracticeSets] = useState<PracticeSet[]>([]);
+  const [logs, setLogs] = useState<SystemLog[]>(INITIAL_SYSTEM_LOGS);
   const [model, setModel] = useStoredState<LocalModelState>('letsdoit_model_v3', defaultModel);
   const [aiSettings, setAiSettings] = useStoredState<AISettings>('letsdoit_ai_settings_v2', DEFAULT_AI_SETTINGS);
   const [desktopEnv, setDesktopEnv] = useState<DesktopEnvironment | null>(null);
   const [desktopModelReady, setDesktopModelReady] = useState(false);
+  const [classroomReady, setClassroomReady] = useState(false);
+  const [classroomNotice, setClassroomNotice] = useState<string | null>(null);
+  const lastMaterialCountRef = useRef(0);
+  const lastRevisionRef = useRef(0);
 
   const screen: Screen = role === 'STUDENT' ? 'student' : role === 'TEACHER' ? 'teacher' : 'auth';
 
+  // Boot: shared classroom store (disk + localStorage) so teacher uploads reach students
   useEffect(() => {
     let mounted = true;
-
-    const loadDesktopState = async () => {
+    const boot = async () => {
       try {
         const environment = await getDesktopEnvironment();
         const storedModel = await loadDesktopModelState();
         const storedSettings = await loadAISettings();
+        const snap = await loadClassroomSnapshot({
+          courses: INITIAL_COURSES,
+          materials: defaultMaterials,
+          // No seeded dummy quizzes — student/teacher quizzes must come from real AI generation
+          quizzes: [],
+          attempts: [],
+          practiceSets: [],
+          logs: INITIAL_SYSTEM_LOGS,
+          student: INITIAL_STUDENT_PROFILE,
+          teacher: defaultTeacher,
+        });
         if (!mounted) return;
         setDesktopEnv(environment);
-        if (storedModel) {
-          setModel(normalizeModelState(storedModel));
-        }
+        if (storedModel) setModel(normalizeModelState(storedModel));
         if (storedSettings) {
           setAiSettings((prev) => ({ ...DEFAULT_AI_SETTINGS, ...prev, ...storedSettings }));
         }
+        setCourses(snap.courses);
+        setMaterials(snap.materials);
+        setQuizzes(snap.quizzes);
+        setAttempts(snap.attempts);
+        setPracticeSets(snap.practiceSets);
+        setLogs(snap.logs);
+        if (snap.student) setStudent(snap.student);
+        if (snap.teacher) setTeacher(snap.teacher);
+        lastRevisionRef.current = snap.revision;
+        lastMaterialCountRef.current = snap.materials.length;
       } finally {
         if (mounted) {
           setDesktopModelReady(true);
+          setClassroomReady(true);
         }
       }
     };
-
-    void loadDesktopState();
+    void boot();
     return () => {
       mounted = false;
     };
   }, [setModel, setAiSettings]);
+
+  // Persist shared classroom slices whenever they change (after boot)
+  useEffect(() => {
+    if (!classroomReady) return;
+    void persistCourses(courses);
+  }, [classroomReady, courses]);
+
+  useEffect(() => {
+    if (!classroomReady) return;
+    void persistMaterials(materials);
+  }, [classroomReady, materials]);
+
+  useEffect(() => {
+    if (!classroomReady) return;
+    void persistQuizzes(quizzes);
+  }, [classroomReady, quizzes]);
+
+  useEffect(() => {
+    if (!classroomReady) return;
+    void persistAttempts(attempts);
+  }, [classroomReady, attempts]);
+
+  useEffect(() => {
+    if (!classroomReady) return;
+    void persistPracticeSets(practiceSets);
+  }, [classroomReady, practiceSets]);
+
+  useEffect(() => {
+    if (!classroomReady) return;
+    void persistLogs(logs);
+  }, [classroomReady, logs]);
+
+  useEffect(() => {
+    if (!classroomReady) return;
+    void persistStudent(student);
+  }, [classroomReady, student]);
+
+  useEffect(() => {
+    if (!classroomReady) return;
+    void persistTeacher(teacher);
+  }, [classroomReady, teacher]);
 
   useEffect(() => {
     if (!desktopModelReady) return;
@@ -271,6 +355,81 @@ function App() {
     void saveAISettings(aiSettings).catch(() => undefined);
   }, [desktopModelReady, aiSettings]);
 
+  // Live sync: poll shared store so students see teacher uploads without re-login
+  useEffect(() => {
+    if (!classroomReady) return;
+
+    const pull = async () => {
+      const shared = await reloadSharedClassroom();
+      const revisionAdvanced = shared.revision > lastRevisionRef.current;
+      lastRevisionRef.current = Math.max(lastRevisionRef.current, shared.revision);
+
+      if (shared.courses) {
+        setCourses((prev) => (stableEqual(prev, shared.courses) ? prev : shared.courses!));
+      }
+      if (shared.quizzes) {
+        setQuizzes((prev) => (stableEqual(prev, shared.quizzes) ? prev : shared.quizzes!));
+      }
+      if (shared.logs) {
+        setLogs((prev) => (stableEqual(prev, shared.logs) ? prev : shared.logs!));
+      }
+      if (shared.materials) {
+        setMaterials((prev) => {
+          if (stableEqual(prev, shared.materials)) return prev;
+          const prevJoined = prev.filter((m) => student.joinedCourseIds.includes(m.courseId));
+          const nextJoined = shared.materials!.filter((m) => student.joinedCourseIds.includes(m.courseId));
+          if (role === 'STUDENT' && nextJoined.length > prevJoined.length) {
+            const newest = nextJoined[0];
+            const delta = nextJoined.length - prevJoined.length;
+            setClassroomNotice(
+              `New course update: ${delta} material(s) for your courses` +
+                (newest ? ` — latest: "${newest.title}"` : '') +
+                `. Open Materials to study.`,
+            );
+          } else if (role === 'STUDENT' && revisionAdvanced && nextJoined.length > 0) {
+            // Updated existing materials (e.g. AI summary refreshed)
+            const changed = nextJoined.find(
+              (n) => !prevJoined.some((p) => p.id === n.id && p.contentHash === n.contentHash),
+            );
+            if (changed) {
+              setClassroomNotice(
+                `Course material updated: "${changed.title}". Open Materials for the latest summary/chunks.`,
+              );
+            }
+          }
+          lastMaterialCountRef.current = shared.materials!.length;
+          return shared.materials!;
+        });
+      }
+    };
+
+    const onStorage = (event: StorageEvent) => {
+      if (
+        event.key === 'letsdoit_materials_v3' ||
+        event.key === 'letsdoit_courses_v3' ||
+        event.key === 'letsdoit_quizzes_v3' ||
+        event.key === 'letsdoit_classroom_revision_v1'
+      ) {
+        void pull();
+      }
+    };
+    const onCustom = () => {
+      void pull();
+    };
+
+    window.addEventListener('storage', onStorage);
+    window.addEventListener('letsdoit-classroom-updated', onCustom as EventListener);
+    const timer = window.setInterval(() => {
+      void pull();
+    }, 2500);
+
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('letsdoit-classroom-updated', onCustom as EventListener);
+      window.clearInterval(timer);
+    };
+  }, [classroomReady, role, student.joinedCourseIds]);
+
   const addLog = (event: string, details: string, logRole: SystemLog['role']) => {
     setLogs((prev) => [{ id: uid('log'), timestamp: nowStamp(), event, details, role: logRole }, ...prev]);
   };
@@ -279,6 +438,17 @@ function App() {
 
   return (
     <div className="min-h-[100dvh] bg-stone-50 text-zinc-950">
+      {classroomNotice && (
+        <div className="sticky top-0 z-50 border-b border-emerald-300 bg-emerald-50 px-4 py-2 text-sm text-emerald-950 flex items-center justify-between gap-3">
+          <span className="font-medium">{classroomNotice}</span>
+          <button type="button" className="btn-ghost text-xs shrink-0" onClick={() => setClassroomNotice(null)}>
+            Dismiss
+          </button>
+        </div>
+      )}
+      {!classroomReady && (
+        <div className="px-4 py-2 text-xs text-zinc-500">Loading shared classroom data…</div>
+      )}
       {screen === 'auth' && (
         <Auth
           student={student}
@@ -302,14 +472,18 @@ function App() {
           model={model}
           aiSettings={aiSettings}
           desktopEnv={desktopEnv}
+          classroomNotice={classroomNotice}
           setStudent={setStudent}
           setCourses={setCourses}
+          setMaterials={setMaterials}
+          setQuizzes={setQuizzes}
           setAttempts={setAttempts}
           setPracticeSets={setPracticeSets}
           setModel={setModel}
           setAiSettings={setAiSettings}
           addLog={addLog}
           onLogout={logout}
+          onDismissNotice={() => setClassroomNotice(null)}
         />
       )}
       {screen === 'teacher' && (
@@ -441,14 +615,18 @@ function StudentWorkspace(props: {
   model: LocalModelState;
   aiSettings: AISettings;
   desktopEnv: DesktopEnvironment | null;
+  classroomNotice?: string | null;
   setStudent: React.Dispatch<React.SetStateAction<StudentProfile>>;
   setCourses: React.Dispatch<React.SetStateAction<Course[]>>;
+  setMaterials: React.Dispatch<React.SetStateAction<CourseMaterial[]>>;
+  setQuizzes: React.Dispatch<React.SetStateAction<Quiz[]>>;
   setAttempts: React.Dispatch<React.SetStateAction<QuizAttempt[]>>;
   setPracticeSets: React.Dispatch<React.SetStateAction<PracticeSet[]>>;
   setModel: React.Dispatch<React.SetStateAction<LocalModelState>>;
   setAiSettings: React.Dispatch<React.SetStateAction<AISettings>>;
   addLog: (event: string, details: string, role: SystemLog['role']) => void;
   onLogout: () => void;
+  onDismissNotice?: () => void;
 }) {
   const [tab, setTab] = useState<StudentTab>('overview');
   const [joinCode, setJoinCode] = useState('');
@@ -464,6 +642,17 @@ function StudentWorkspace(props: {
   const [result, setResult] = useState<QuizAttempt | null>(null);
   const [activePracticeSet, setActivePracticeSet] = useState<PracticeSet | null>(null);
   const [practiceResults, setPracticeResults] = useState<Record<string, string>>({});
+  const [materialBusyId, setMaterialBusyId] = useState<string | null>(null);
+  const [materialActionMsg, setMaterialActionMsg] = useState<string | null>(null);
+  const [quizDifficulty, setQuizDifficulty] = useState<'easy' | 'moderate' | 'hard'>('moderate');
+  const [summaryPanel, setSummaryPanel] = useState<{
+    materialId: string;
+    title: string;
+    summary: string;
+    points: string[];
+    studyHelp: string;
+    provider: string;
+  } | null>(null);
 
   const joinedCourses = useMemo(
     () => props.courses.filter((course) => props.profile.joinedCourseIds.includes(course.id)),
@@ -495,33 +684,36 @@ function StudentWorkspace(props: {
     event?.preventDefault();
     const prompt = promptOverride || chatInput.trim();
     if (!prompt) return;
-    const materialContext = selectedMaterial
-      ? [
-          `Selected material: ${selectedMaterial.title}`,
-          selectedMaterial.contentSummary ? `Summary: ${selectedMaterial.contentSummary}` : '',
-          selectedMaterial.importantPoints?.length
-            ? `Important points:\n${selectedMaterial.importantPoints.map((p) => `- ${p}`).join('\n')}`
-            : '',
-          selectedMaterial.contentText
-            ? `Source excerpt:\n${selectedMaterial.contentText.slice(0, 8000)}`
-            : '',
-        ]
-          .filter(Boolean)
-          .join('\n\n')
-      : '';
-    const finalPrompt = materialContext ? `${prompt}\n\n${materialContext}` : prompt;
 
     setChatInput('');
     setThinking(true);
     setChat((prev) => [...prev, { id: uid('msg'), sender: 'user', text: prompt, timestamp: nowStamp() }]);
     try {
-      const response = await router.complete(finalPrompt, aiMode, props.model, languageStyle, props.aiSettings);
+      // RAG: retrieve relevant chunks from selected material or all enrolled courses
+      const history = chat.slice(-6).map((m) => ({
+        role: (m.sender === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
+        content: m.text,
+      }));
+      const response = await answerWithRag({
+        question: prompt,
+        mode: aiMode,
+        model: props.model,
+        settings: props.aiSettings,
+        style: languageStyle,
+        selectedMaterial,
+        courseMaterials: joinedMaterials,
+        courseIds: props.profile.joinedCourseIds,
+        history,
+      });
       setChat((prev) => [
         ...prev,
         {
           id: uid('msg'),
           sender: 'ai',
-          text: `${response.text}\n\nProvider: ${response.providerName}${response.fromCache ? ' · cached' : ''}`,
+          text:
+            `${response.text}\n\n` +
+            `Provider: ${response.providerName}${response.fromCache ? ' · cached' : ''}` +
+            ` · RAG: ${response.ragChunks} passage(s) (${response.ragMode})`,
           timestamp: nowStamp(),
           modeUsed: response.modeUsed,
         },
@@ -592,22 +784,170 @@ function StudentWorkspace(props: {
     props.setStudent((prev) => ({ ...prev, preparationLevel: prepFromPercent(percent) }));
     props.addLog('Quiz attempt', `${props.profile.name} scored ${score}/${activeQuiz.questions.length} on ${activeQuiz.title}.`, 'STUDENT');
 
-    // Auto-generate personalized practice set if there were mistakes
-    if (mistakes.length > 0) {
-      const practiceSet = generatePracticeSet({
-        studentId: props.profile.id,
-        courseId: activeQuiz.courseId,
-        courseTitle: props.courses.find((course) => course.id === activeQuiz.courseId)?.title || 'Course',
-        attemptId: attempt.id,
-        mistakes,
-        weakTopics: Array.from(weakTopics),
-      });
-      props.setPracticeSets((prev) => [practiceSet, ...prev]);
-    }
-
     setResult(attempt);
     setActiveQuiz(null);
     setAnswers({});
+
+    // Real AI practice set for self-improvement (no dummy templates)
+    if (mistakes.length > 0) {
+      setMaterialActionMsg('Generating real AI practice set from your mistakes + document chunks…');
+      const sourceMaterial =
+        props.materials.find((m) => m.id === activeQuiz.sourceMaterialId) ||
+        props.materials.find((m) => m.courseId === activeQuiz.courseId && (m.chunks?.length || m.contentText));
+      void (async () => {
+        try {
+          const practiceSet = await generatePracticeSetWithAI({
+            studentId: props.profile.id,
+            courseId: activeQuiz.courseId,
+            courseTitle:
+              props.courses.find((course) => course.id === activeQuiz.courseId)?.title || 'Course',
+            attemptId: attempt.id,
+            mistakes,
+            weakTopics: Array.from(weakTopics),
+            material: sourceMaterial || null,
+            mode: aiMode,
+            model: props.model,
+            settings: props.aiSettings,
+            style: languageStyle,
+          });
+          props.setPracticeSets((prev) => [practiceSet, ...prev]);
+          setMaterialActionMsg(
+            `Practice set ready: ${practiceSet.questions.length} real questions for self-improvement. Open Practice tab.`,
+          );
+          props.addLog(
+            'Practice set generated',
+            `AI practice (${practiceSet.questions.length} Qs) for ${activeQuiz.title}.`,
+            'STUDENT',
+          );
+        } catch (error) {
+          setMaterialActionMsg(
+            error instanceof Error
+              ? `Could not generate AI practice set:\n${error.message}`
+              : 'Could not generate AI practice set.',
+          );
+        }
+      })();
+    }
+  };
+
+  const runDocumentSummary = async (material: CourseMaterial) => {
+    if (materialBusyId) return;
+    setMaterialBusyId(material.id);
+    setMaterialActionMsg(`Generating document summary for "${material.title}" with ${aiMode} model...`);
+    setSummaryPanel(null);
+    try {
+      const chunks =
+        material.chunks?.length
+          ? material.chunks
+          : chunkDocumentText(material.contentText || material.contentSummary || '');
+      if (!chunks.length && !(material.contentText || material.contentSummary)) {
+        throw new Error('This material has no extracted text yet. Ask your teacher to re-upload a searchable PDF.');
+      }
+      const analysis = await processMaterialWithAI(
+        material.title,
+        material.contentText || material.contentSummary || '',
+        aiMode,
+        props.model,
+        props.aiSettings,
+        languageStyle,
+        chunks,
+      );
+      // Persist improved summary on the shared material record
+      props.setMaterials((prev) =>
+        prev.map((m) =>
+          m.id === material.id
+            ? {
+                ...m,
+                contentSummary: analysis.summary,
+                importantPoints: analysis.importantPoints,
+                studyHelp: analysis.studyHelp,
+                aiProcessed: true,
+                chunks: m.chunks?.length ? m.chunks : chunks,
+              }
+            : m,
+        ),
+      );
+      setSummaryPanel({
+        materialId: material.id,
+        title: material.title,
+        summary: analysis.summary,
+        points: analysis.importantPoints,
+        studyHelp: analysis.studyHelp,
+        provider: analysis.providerName,
+      });
+      setMaterialActionMsg(`Document summary ready via ${analysis.providerName}.`);
+      props.addLog(
+        'Document summary',
+        `${props.profile.name} generated AI summary for ${material.title}.`,
+        'STUDENT',
+      );
+    } catch (error) {
+      setMaterialActionMsg(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMaterialBusyId(null);
+    }
+  };
+
+  const runPracticeQuizFromMaterial = async (material: CourseMaterial) => {
+    if (materialBusyId) return;
+    setMaterialBusyId(material.id);
+    setMaterialActionMsg(
+      `Generating ${quizDifficulty} practice quiz from document chunks for "${material.title}"...`,
+    );
+    try {
+      const chunks =
+        material.chunks?.length
+          ? material.chunks
+          : chunkDocumentText(material.contentText || material.contentSummary || '');
+      const materialWithChunks: CourseMaterial = {
+        ...material,
+        chunks: chunks.length ? chunks : material.chunks,
+      };
+      if (!chunks.length && !material.contentText?.trim()) {
+        throw new Error(
+          'Cannot build a quiz: no document chunks available. Ask the teacher to re-upload the PDF with extractable text.',
+        );
+      }
+      const quiz = await generateQuizWithAI(
+        {
+          courseId: material.courseId,
+          title: `Practice: ${material.title} (${quizDifficulty})`,
+          material: materialWithChunks,
+          difficulty: quizDifficulty,
+          questionType: 'Mixed',
+          isTestMode: false,
+          timeLimit: quizDifficulty === 'hard' ? 20 : quizDifficulty === 'moderate' ? 15 : 10,
+        },
+        aiMode,
+        props.model,
+        props.aiSettings,
+        languageStyle,
+      );
+      quiz.isPublished = true;
+      quiz.isDraft = false;
+      props.setQuizzes((prev) => [quiz, ...prev]);
+      if (!material.chunks?.length && chunks.length) {
+        props.setMaterials((prev) =>
+          prev.map((m) => (m.id === material.id ? { ...m, chunks } : m)),
+        );
+      }
+      setActiveQuiz(quiz);
+      setResult(null);
+      setAnswers({});
+      setTab('quizzes');
+      setMaterialActionMsg(
+        `Quiz ready: ${quiz.questions.length} questions from document chunks (${quizDifficulty}).`,
+      );
+      props.addLog(
+        'Practice quiz generated',
+        `${props.profile.name} generated a ${quizDifficulty} quiz from ${material.title} (${quiz.questions.length} Qs).`,
+        'STUDENT',
+      );
+    } catch (error) {
+      setMaterialActionMsg(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMaterialBusyId(null);
+    }
   };
 
   return (
@@ -621,6 +961,24 @@ function StudentWorkspace(props: {
     >
       {tab === 'overview' && (
         <div className="grid gap-5 lg:grid-cols-[1.4fr_0.8fr]">
+          {props.classroomNotice && (
+            <Panel className="lg:col-span-2 border-emerald-300 bg-emerald-50 p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="label text-emerald-800">Course update</p>
+                  <p className="mt-1 text-sm text-emerald-950">{props.classroomNotice}</p>
+                </div>
+                <div className="flex gap-2 shrink-0">
+                  <button type="button" className="btn-primary text-xs" onClick={() => setTab('materials')}>
+                    Open materials
+                  </button>
+                  <button type="button" className="btn-ghost text-xs" onClick={() => props.onDismissNotice?.()}>
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+            </Panel>
+          )}
           <Panel className="p-6">
             <p className="label">Preparation status</p>
             <div className="flex items-center gap-2">
@@ -642,9 +1000,12 @@ function StudentWorkspace(props: {
             </div>
             <div className="mt-6 grid sm:grid-cols-3 gap-3">
               <Metric label="Joined courses" value={joinedCourses.length} />
+              <Metric label="Course materials" value={joinedMaterials.length} />
               <Metric label="Practice attempts" value={props.attempts.length} />
-              <Metric label="Total enrolled visible" value={joinedCourses.reduce((sum, item) => sum + item.enrolledCount, 0)} />
             </div>
+            <p className="mt-3 text-[11px] text-zinc-500">
+              Materials sync automatically when your teacher uploads to a joined course (shared classroom store).
+            </p>
           </Panel>
           <ModelPanel model={props.model} setModel={props.setModel} aiSettings={props.aiSettings} setAiSettings={props.setAiSettings} desktopEnv={props.desktopEnv} compact />
           <Panel className="lg:col-span-2 p-6">
@@ -696,45 +1057,158 @@ function StudentWorkspace(props: {
       )}
 
       {tab === 'materials' && (
-        <div className="grid gap-4 md:grid-cols-2">
-          {joinedMaterials.map((material) => (
-            <Panel key={material.id} className="p-5">
+        <div className="space-y-4">
+          <Panel className="p-4">
+            <div className="flex flex-wrap items-end gap-3">
+              <div className="min-w-[160px]">
+                <Select
+                  label="Practice quiz difficulty"
+                  value={quizDifficulty}
+                  onChange={(v) => setQuizDifficulty(v as 'easy' | 'moderate' | 'hard')}
+                  options={[
+                    { label: 'Easy', value: 'easy' },
+                    { label: 'Moderate', value: 'moderate' },
+                    { label: 'Hard', value: 'hard' },
+                  ]}
+                />
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {(['OFFLINE', 'ONLINE', 'HYBRID'] as AIMode[]).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    className={`nav-btn ${aiMode === mode ? 'nav-btn-active' : ''}`}
+                    onClick={() => setAiMode(mode)}
+                  >
+                    {mode}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <p className="mt-2 text-[11px] text-zinc-500">
+              Materials uploaded by your teacher appear here. Document Summary and Practice Quiz use real model inference on extracted document chunks — not dummy text.
+            </p>
+            {materialActionMsg && (
+              <pre className="mt-3 whitespace-pre-wrap border border-zinc-200 bg-stone-50 px-3 py-2 text-[11px] text-zinc-700">
+                {materialActionMsg}
+              </pre>
+            )}
+          </Panel>
+
+          {summaryPanel && (
+            <Panel className="p-5 border-emerald-200">
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <p className="label">{material.type} · {material.topic || 'Lesson'}</p>
-                  <h3 className="mt-2 text-lg font-black">{material.title}</h3>
+                  <p className="label">Document summary</p>
+                  <h3 className="mt-1 text-lg font-black">{summaryPanel.title}</h3>
+                  <p className="mt-1 text-[11px] text-zinc-500">{summaryPanel.provider}</p>
                 </div>
-                <FileText className="h-5 w-5 text-emerald-600" />
+                <button className="btn-ghost text-xs" type="button" onClick={() => setSummaryPanel(null)}>
+                  Close
+                </button>
               </div>
-              <p className="mt-3 text-sm leading-6 text-zinc-600">{material.contentSummary}</p>
-              <div className="mt-4 flex flex-wrap gap-2">
-                <button className="btn-ghost" onClick={() => {
-                  const blob = new Blob([material.contentText || material.contentSummary], { type: 'text/plain' });
-                  const url = URL.createObjectURL(blob);
-                  const link = document.createElement('a');
-                  link.href = url;
-                  link.download = material.fileName;
-                  link.click();
-                  URL.revokeObjectURL(url);
-                }}><Download className="h-4 w-4" /> Download</button>
-                <button className="btn-primary" onClick={() => {
-                  setSelectedMaterial(material);
-                  setTab('assistant');
-                  void sendChat(
-                    undefined,
-                    `Using the uploaded material "${material.title}", provide:\n1) A clear summary\n2) Important points\n3) A short study plan with practice questions.`,
-                  );
-                }}><Bot className="h-4 w-4" /> Send to AI</button>
-              </div>
-              {material.importantPoints && material.importantPoints.length > 0 && (
-                <ul className="mt-3 space-y-1 text-xs text-zinc-600">
-                  {material.importantPoints.slice(0, 5).map((point) => (
-                    <li key={point}>• {point}</li>
-                  ))}
-                </ul>
+              <p className="mt-3 text-sm leading-6 text-zinc-700 whitespace-pre-wrap">{summaryPanel.summary}</p>
+              {summaryPanel.points.length > 0 && (
+                <div className="mt-4">
+                  <p className="text-[10px] font-bold uppercase tracking-wide text-zinc-500">Important points</p>
+                  <ul className="mt-1 space-y-1 text-sm text-zinc-700">
+                    {summaryPanel.points.map((point) => (
+                      <li key={point}>• {point}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {summaryPanel.studyHelp && (
+                <div className="mt-4">
+                  <p className="text-[10px] font-bold uppercase tracking-wide text-zinc-500">Study help</p>
+                  <p className="mt-1 text-sm leading-6 text-zinc-700 whitespace-pre-wrap">{summaryPanel.studyHelp}</p>
+                </div>
               )}
             </Panel>
-          ))}
+          )}
+
+          <div className="grid gap-4 md:grid-cols-2">
+            {joinedMaterials.map((material) => (
+              <Panel key={material.id} className="p-5">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="label">
+                      {material.type} · {material.topic || 'Lesson'}
+                      {material.chunks?.length ? ` · ${material.chunks.length} chunks` : ''}
+                    </p>
+                    <h3 className="mt-2 text-lg font-black">{material.title}</h3>
+                    <p className="mt-1 text-xs text-zinc-500">
+                      {material.fileName} · {material.fileSize}
+                      {material.aiProcessed ? ' · AI analyzed' : ''}
+                    </p>
+                  </div>
+                  <FileText className="h-5 w-5 text-emerald-600" />
+                </div>
+                <p className="mt-3 text-sm leading-6 text-zinc-600">{material.contentSummary}</p>
+                {material.importantPoints && material.importantPoints.length > 0 && (
+                  <ul className="mt-3 space-y-1 text-xs text-zinc-600">
+                    {material.importantPoints.slice(0, 5).map((point) => (
+                      <li key={point}>• {point}</li>
+                    ))}
+                  </ul>
+                )}
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button
+                    className="btn-primary"
+                    type="button"
+                    disabled={materialBusyId === material.id}
+                    onClick={() => void runDocumentSummary(material)}
+                  >
+                    <Bot className="h-4 w-4" />
+                    {materialBusyId === material.id ? 'Working...' : 'Document Summary'}
+                  </button>
+                  <button
+                    className="btn-primary"
+                    type="button"
+                    disabled={materialBusyId === material.id}
+                    onClick={() => void runPracticeQuizFromMaterial(material)}
+                  >
+                    <CheckCircle2 className="h-4 w-4" />
+                    Practice Quiz
+                  </button>
+                  <button
+                    className="btn-ghost"
+                    type="button"
+                    onClick={() => {
+                      setSelectedMaterial(material);
+                      setTab('assistant');
+                    }}
+                  >
+                    <Bot className="h-4 w-4" /> Chat
+                  </button>
+                  <button
+                    className="btn-ghost"
+                    type="button"
+                    onClick={() => {
+                      const blob = new Blob([material.contentText || material.contentSummary], {
+                        type: 'text/plain',
+                      });
+                      const url = URL.createObjectURL(blob);
+                      const link = document.createElement('a');
+                      link.href = url;
+                      link.download = material.fileName.endsWith('.pdf')
+                        ? material.fileName.replace(/\.pdf$/i, '.txt')
+                        : material.fileName;
+                      link.click();
+                      URL.revokeObjectURL(url);
+                    }}
+                  >
+                    <Download className="h-4 w-4" /> Download text
+                  </button>
+                </div>
+              </Panel>
+            ))}
+            {!joinedMaterials.length && (
+              <div className="md:col-span-2">
+                <Empty text="No course materials yet. Join a course with a 4-digit code — teacher uploads will appear here." />
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -834,7 +1308,7 @@ function TeacherWorkspace(props: {
   const [selectedCourseId, setSelectedCourseId] = useState(props.courses[0]?.id || '');
   const [courseDraft, setCourseDraft] = useState({ title: '', description: '', subject: '', semester: '6th Semester', code: '' });
   const [materialDraft, setMaterialDraft] = useState({ title: '', topic: 'Week 1', summary: '' });
-  const [quizDraft, setQuizDraft] = useState({ title: '', materialId: '', difficulty: 'medium' as Quiz['difficulty'], type: 'MCQ' as Quiz['questionType'], mode: 'practice', timeLimit: 15 });
+  const [quizDraft, setQuizDraft] = useState({ title: '', materialId: '', difficulty: 'moderate' as Quiz['difficulty'], type: 'MCQ' as Quiz['questionType'], mode: 'practice', timeLimit: 15 });
   const [draftQuizzes, setDraftQuizzes] = useState<Quiz[]>([]);
   const [editingQuiz, setEditingQuiz] = useState<Quiz | null>(null);
   const [teacherChat, setTeacherChat] = useState<ChatMessage[]>([]);
@@ -843,6 +1317,8 @@ function TeacherWorkspace(props: {
   const [thinking, setThinking] = useState(false);
   const [uploadingMaterial, setUploadingMaterial] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
+  const [summarizingId, setSummarizingId] = useState<string | null>(null);
+  const [generatingQuiz, setGeneratingQuiz] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const teacherCourses = props.courses.filter((course) => course.teacherId === props.profile.id || props.profile.id === 't1');
@@ -888,16 +1364,22 @@ function TeacherWorkspace(props: {
       let fileSize = 'manual note';
       let type: FileType = 'notes';
       let extractWarning: string | undefined;
+      let pageCount: number | undefined;
+      let chunks = chunkDocumentText(contentText);
 
       if (file) {
         fileName = file.name;
         fileSize = `${(file.size / 1024 / 1024).toFixed(2)} MB`;
         type = fileTypeFromName(file.name);
-        setUploadStatus(`Extracting text from ${file.name}...`);
+        setUploadStatus(`Extracting & chunking text from ${file.name}...`);
         const extracted = await extractTextFromFile(file);
         if (extracted.text) {
           contentText = [materialDraft.summary, extracted.text].filter(Boolean).join('\n\n');
         }
+        chunks = extracted.chunks?.length
+          ? extracted.chunks
+          : chunkDocumentText(contentText);
+        pageCount = extracted.pageCount || undefined;
         extractWarning = extracted.warning;
         if (!extracted.text && !materialDraft.summary) {
           setUploadStatus(
@@ -905,6 +1387,8 @@ function TeacherWorkspace(props: {
               'No text could be extracted. Add a summary so the AI can still use this material.',
           );
         }
+      } else if (contentText.trim()) {
+        chunks = chunkDocumentText(contentText);
       }
 
       if (!contentText.trim() && !materialDraft.summary.trim()) {
@@ -915,18 +1399,22 @@ function TeacherWorkspace(props: {
       const title = materialDraft.title || fileName;
       let contentSummary =
         materialDraft.summary ||
-        `Indexed ${fileName} for AI study help.`;
+        `Indexed ${fileName} into ${chunks.length || 0} chunk(s) for AI study help.`;
       let importantPoints: string[] = [];
       let studyHelp = '';
       let aiProcessed = false;
       let statusMessage = extractWarning || '';
 
-      // Run AI analysis when we have content and a usable provider path
-      const canRunOnline = Boolean(props.aiSettings.openRouterApiKey?.trim());
+      // Auto-run AI analysis when a provider is available
+      const canRunOnline = Boolean(
+        props.aiSettings.openRouterApiKey?.trim() || props.aiSettings.googleAiApiKey?.trim(),
+      );
       const canRunOffline = props.model.connected;
       if (contentText.trim()) {
         if (canRunOnline || canRunOffline) {
-          setUploadStatus('Generating summary and important points with AI...');
+          setUploadStatus(
+            `Generating summary from ${chunks.length || 1} chunk(s) with ${aiMode} model...`,
+          );
           try {
             const analysis = await processMaterialWithAI(
               title,
@@ -934,12 +1422,14 @@ function TeacherWorkspace(props: {
               aiMode,
               props.model,
               props.aiSettings,
+              'en',
+              chunks,
             );
             contentSummary = analysis.summary || contentSummary;
             importantPoints = analysis.importantPoints;
             studyHelp = analysis.studyHelp;
             aiProcessed = true;
-            statusMessage = `Stored with AI analysis via ${analysis.providerName}.`;
+            statusMessage = `Stored with ${chunks.length} chunk(s). AI analysis via ${analysis.providerName}.`;
           } catch (aiError) {
             const msg = aiError instanceof Error ? aiError.message : String(aiError);
             contentSummary =
@@ -948,13 +1438,14 @@ function TeacherWorkspace(props: {
               contentSummary;
             importantPoints = extractFallbackPoints(contentText);
             statusMessage =
-              `Material saved with extracted text, but AI analysis failed:\n${msg}`;
+              `Material saved with ${chunks.length} extracted chunk(s), but AI analysis failed:\n${msg}\n\n` +
+              `Use "Summarize with Model" after fixing Online/Offline settings.`;
           }
         } else {
           contentSummary = materialDraft.summary || compactText(contentText, 400);
           importantPoints = extractFallbackPoints(contentText);
           statusMessage =
-            'Material saved with extracted text. Add an OpenRouter key or connect Ollama for AI summary.';
+            `Material saved with ${chunks.length} chunk(s). Add an OpenRouter or Google AI key (or connect offline model), then click Summarize with Model.`;
         }
       }
 
@@ -970,11 +1461,13 @@ function TeacherWorkspace(props: {
         contentSummary,
         topic: materialDraft.topic,
         contentText,
+        chunks,
         importantPoints,
         studyHelp,
         contentHash,
         aiProcessed,
         extractWarning,
+        pageCount,
       };
       material.lessonMap = createLessonMap(material);
       props.setMaterials((prev) => [material, ...prev]);
@@ -982,14 +1475,14 @@ function TeacherWorkspace(props: {
       if (fileInput.current) fileInput.current.value = '';
       props.addLog(
         'Material uploaded',
-        `${material.title} was indexed for ${selectedCourse.title}${aiProcessed ? ' with AI analysis' : ''}.`,
+        `${material.title} was indexed for ${selectedCourse.title} (${chunks.length} chunks)${aiProcessed ? ' with AI analysis' : ''}.`,
         'TEACHER',
       );
       setUploadStatus(
         statusMessage ||
           (aiProcessed
             ? `Stored "${material.title}" with AI summary and important points.`
-            : `Stored "${material.title}".`),
+            : `Stored "${material.title}" with ${chunks.length} chunks.`),
       );
     } catch (error) {
       setUploadStatus(error instanceof Error ? error.message : 'Upload failed.');
@@ -998,25 +1491,116 @@ function TeacherWorkspace(props: {
     }
   };
 
-  const generateQuiz = () => {
-    if (!selectedCourse) return;
-    const material = props.materials.find((item) => item.id === quizDraft.materialId) || selectedMaterials[0];
-    if (!material) return;
-    const quiz = generateOfflineQuiz({
-      courseId: selectedCourse.id,
-      title: quizDraft.title || `${quizDraft.mode === 'official' ? 'Official Test' : 'Practice'}: ${material.title}`,
-      material,
-      difficulty: quizDraft.difficulty,
-      questionType: quizDraft.type,
-      isTestMode: quizDraft.mode === 'official',
-      timeLimit: quizDraft.timeLimit,
-    });
-    quiz.isPublished = false;
-    quiz.isDraft = true;
-    props.setQuizzes((prev) => [quiz, ...prev]);
-    setDraftQuizzes((prev) => [quiz, ...prev]);
-    setEditingQuiz(quiz);
-    props.addLog('Quiz drafted', `${quiz.title} was drafted from ${material.title}. Review before publishing.`, 'TEACHER');
+  const summarizeMaterialWithModel = async (material: CourseMaterial) => {
+    if (summarizingId) return;
+    setSummarizingId(material.id);
+    setUploadStatus(`Summarizing "${material.title}" with ${aiMode} model...`);
+    try {
+      const chunks =
+        material.chunks?.length
+          ? material.chunks
+          : chunkDocumentText(material.contentText || material.contentSummary || '');
+      if (!chunks.length && !(material.contentText || '').trim()) {
+        throw new Error('No extractable text on this material. Re-upload a searchable PDF.');
+      }
+      const analysis = await processMaterialWithAI(
+        material.title,
+        material.contentText || material.contentSummary || '',
+        aiMode,
+        props.model,
+        props.aiSettings,
+        'en',
+        chunks,
+      );
+      props.setMaterials((prev) =>
+        prev.map((m) =>
+          m.id === material.id
+            ? {
+                ...m,
+                contentSummary: analysis.summary,
+                importantPoints: analysis.importantPoints,
+                studyHelp: analysis.studyHelp,
+                aiProcessed: true,
+                chunks: m.chunks?.length ? m.chunks : chunks,
+                lessonMap: createLessonMap({
+                  ...m,
+                  contentSummary: analysis.summary,
+                  contentText: m.contentText,
+                }),
+              }
+            : m,
+        ),
+      );
+      setUploadStatus(
+        `Summary updated via ${analysis.providerName}.\n${analysis.importantPoints.length} important points generated.`,
+      );
+      props.addLog(
+        'Material summarized',
+        `${material.title} summarized with ${analysis.providerName}.`,
+        'TEACHER',
+      );
+    } catch (error) {
+      setUploadStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSummarizingId(null);
+    }
+  };
+
+  const generateQuiz = async () => {
+    if (!selectedCourse || generatingQuiz) return;
+    const material =
+      props.materials.find((item) => item.id === quizDraft.materialId) || selectedMaterials[0];
+    if (!material) {
+      setUploadStatus('Select a source material with extracted document chunks first.');
+      return;
+    }
+    setGeneratingQuiz(true);
+    setUploadStatus(`Generating quiz from "${material.title}" chunks with ${aiMode} model...`);
+    try {
+      const chunks =
+        material.chunks?.length
+          ? material.chunks
+          : chunkDocumentText(material.contentText || material.contentSummary || '');
+      const materialWithChunks = { ...material, chunks };
+      const quiz = await generateQuizWithAI(
+        {
+          courseId: selectedCourse.id,
+          title:
+            quizDraft.title ||
+            `${quizDraft.mode === 'official' ? 'Official Test' : 'Practice'}: ${material.title}`,
+          material: materialWithChunks,
+          difficulty: quizDraft.difficulty === 'medium' ? 'moderate' : quizDraft.difficulty,
+          questionType: quizDraft.type,
+          isTestMode: quizDraft.mode === 'official',
+          timeLimit: quizDraft.timeLimit,
+        },
+        aiMode,
+        props.model,
+        props.aiSettings,
+      );
+      quiz.isPublished = false;
+      quiz.isDraft = true;
+      if (!material.chunks?.length && chunks.length) {
+        props.setMaterials((prev) =>
+          prev.map((m) => (m.id === material.id ? { ...m, chunks } : m)),
+        );
+      }
+      props.setQuizzes((prev) => [quiz, ...prev]);
+      setDraftQuizzes((prev) => [quiz, ...prev]);
+      setEditingQuiz(quiz);
+      setUploadStatus(
+        `Draft quiz ready: ${quiz.questions.length} real questions from document chunks. Review before publishing.`,
+      );
+      props.addLog(
+        'Quiz drafted',
+        `${quiz.title} drafted from ${material.title} via AI (${quiz.questions.length} Qs).`,
+        'TEACHER',
+      );
+    } catch (error) {
+      setUploadStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setGeneratingQuiz(false);
+    }
   };
 
   const sendTeacherChat = async (event: React.FormEvent) => {
@@ -1027,17 +1611,35 @@ function TeacherWorkspace(props: {
     setThinking(true);
     setTeacherChat((prev) => [...prev, { id: uid('msg'), sender: 'user', text: prompt, timestamp: nowStamp() }]);
     try {
-      const materialSnippets = selectedMaterials
-        .slice(0, 3)
-        .map((m) => `- ${m.title}: ${m.contentSummary}${m.importantPoints?.length ? ` | Points: ${m.importantPoints.slice(0, 3).join('; ')}` : ''}`)
-        .join('\n');
-      const context =
-        `Course analytics: ${selectedCourse?.title}. Attempts: ${selectedAttempts.length}. ` +
-        `Weak topics: ${weakTopics.join(', ') || 'none yet'}.\n` +
-        (materialSnippets ? `Recent materials:\n${materialSnippets}\n` : '') +
-        `Request: ${prompt}`;
-      const response = await router.complete(context, aiMode, props.model, 'en', props.aiSettings);
-      setTeacherChat((prev) => [...prev, { id: uid('msg'), sender: 'ai', text: response.text, timestamp: nowStamp(), modeUsed: response.modeUsed }]);
+      const history = teacherChat.slice(-6).map((m) => ({
+        role: (m.sender === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
+        content: m.text,
+      }));
+      const analyticsHint =
+        `Course analytics: ${selectedCourse?.title || 'n/a'}. Attempts: ${selectedAttempts.length}. ` +
+        `Weak topics: ${weakTopics.join(', ') || 'none yet'}.`;
+      const response = await answerWithRag({
+        question: `${prompt}\n\n(${analyticsHint})`,
+        mode: aiMode,
+        model: props.model,
+        settings: props.aiSettings,
+        style: 'en',
+        courseMaterials: selectedMaterials,
+        courseIds: selectedCourse ? [selectedCourse.id] : teacherCourses.map((c) => c.id),
+        history,
+      });
+      setTeacherChat((prev) => [
+        ...prev,
+        {
+          id: uid('msg'),
+          sender: 'ai',
+          text:
+            `${response.text}\n\nProvider: ${response.providerName}` +
+            ` · RAG: ${response.ragChunks} passage(s)`,
+          timestamp: nowStamp(),
+          modeUsed: response.modeUsed,
+        },
+      ]);
     } catch (error) {
       setTeacherChat((prev) => [...prev, { id: uid('msg'), sender: 'ai', text: error instanceof Error ? error.message : 'AI request failed.', timestamp: nowStamp(), modeUsed: aiMode }]);
     } finally {
@@ -1129,6 +1731,8 @@ function TeacherWorkspace(props: {
                       <h3 className="font-black">{material.title}</h3>
                       <p className="mt-1 text-xs text-zinc-500">
                         {material.topic} · {material.fileName} · {material.fileSize}
+                        {material.chunks?.length ? ` · ${material.chunks.length} chunks` : ''}
+                        {material.pageCount ? ` · ${material.pageCount} pages` : ''}
                         {material.aiProcessed ? ' · AI analyzed' : ''}
                       </p>
                     </div>
@@ -1149,6 +1753,15 @@ function TeacherWorkspace(props: {
                     <p className="mt-2 text-[11px] text-amber-700">{material.extractWarning}</p>
                   )}
                   <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      className="btn-primary text-xs"
+                      type="button"
+                      disabled={summarizingId === material.id}
+                      onClick={() => void summarizeMaterialWithModel(material)}
+                    >
+                      <Bot className="h-3 w-3" />
+                      {summarizingId === material.id ? 'Summarizing...' : 'Summarize with Model'}
+                    </button>
                     {material.lessonMap?.slice(0, 3).map((item) => <span key={item.concept} className="tag">{item.concept}</span>)}
                   </div>
                 </div>
@@ -1166,10 +1779,42 @@ function TeacherWorkspace(props: {
               <CourseSelect courses={teacherCourses} value={selectedCourse?.id || ''} onChange={setSelectedCourseId} />
               <Select label="Source material" value={quizDraft.materialId} onChange={(value) => setQuizDraft((prev) => ({ ...prev, materialId: value }))} options={selectedMaterials.map((item) => ({ label: item.title, value: item.id }))} />
               <Field label="Quiz title" value={quizDraft.title} onChange={(value) => setQuizDraft((prev) => ({ ...prev, title: value }))} />
-              <Select label="Difficulty" value={quizDraft.difficulty} onChange={(value) => setQuizDraft((prev) => ({ ...prev, difficulty: value as Quiz['difficulty'] }))} options={['easy', 'medium', 'hard'].map((value) => ({ label: value, value }))} />
+              <Select
+                label="Difficulty"
+                value={quizDraft.difficulty === 'medium' ? 'moderate' : quizDraft.difficulty}
+                onChange={(value) =>
+                  setQuizDraft((prev) => ({
+                    ...prev,
+                    difficulty: value as Quiz['difficulty'],
+                  }))
+                }
+                options={[
+                  { label: 'easy', value: 'easy' },
+                  { label: 'moderate', value: 'moderate' },
+                  { label: 'hard', value: 'hard' },
+                ]}
+              />
               <Select label="Question type" value={quizDraft.type} onChange={(value) => setQuizDraft((prev) => ({ ...prev, type: value as Quiz['questionType'] }))} options={['MCQ', 'Short', 'True/False', 'Mixed'].map((value) => ({ label: value, value }))} />
               <Select label="Mode" value={quizDraft.mode} onChange={(value) => setQuizDraft((prev) => ({ ...prev, mode: value }))} options={[{ label: 'Practice quiz', value: 'practice' }, { label: 'Official test', value: 'official' }]} />
-              <button className="btn-primary" onClick={generateQuiz} type="button"><Bot className="h-4 w-4" /> Generate draft quiz</button>
+              <div className="flex flex-wrap gap-2">
+                {(['OFFLINE', 'ONLINE', 'HYBRID'] as AIMode[]).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    className={`nav-btn ${aiMode === mode ? 'nav-btn-active' : ''}`}
+                    onClick={() => setAiMode(mode)}
+                  >
+                    {mode}
+                  </button>
+                ))}
+              </div>
+              <button className="btn-primary" onClick={() => void generateQuiz()} type="button" disabled={generatingQuiz}>
+                <Bot className="h-4 w-4" />
+                {generatingQuiz ? 'Generating with AI...' : 'Generate draft quiz from document'}
+              </button>
+              <p className="text-[11px] text-zinc-500">
+                Questions are generated by the selected AI mode from real document chunks — not templates.
+              </p>
             </div>
           </Panel>
           <Panel className="p-5">
@@ -1336,13 +1981,17 @@ function ModelPanel({
 }) {
   const [testingOffline, setTestingOffline] = useState(false);
   const [testingOnline, setTestingOnline] = useState(false);
+  const [testingGoogle, setTestingGoogle] = useState(false);
   const [offlineStatus, setOfflineStatus] = useState<string | null>(null);
   const [onlineStatus, setOnlineStatus] = useState<string | null>(null);
+  const [googleStatus, setGoogleStatus] = useState<string | null>(null);
   const [localModels, setLocalModels] = useState<LocalGgufModel[]>([]);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [downloadDetail, setDownloadDetail] = useState<string | null>(null);
   const [hfUrlDraft, setHfUrlDraft] = useState(model.hfUrl || HF_GEMMA_PRESETS[0]?.hfUrl || '');
   const [hfTokenDraft, setHfTokenDraft] = useState(model.hfToken || '');
+  const [manualPathDraft, setManualPathDraft] = useState('');
+  const manualFileInput = useRef<HTMLInputElement>(null);
 
   const refreshInstalled = async () => {
     if (!isDesktopRuntime()) {
@@ -1376,16 +2025,29 @@ function ModelPanel({
 
   const handleTestOnline = async () => {
     setTestingOnline(true);
-    setOnlineStatus('Testing OpenRouter online model...');
+    setOnlineStatus('Testing OpenRouter online models (primary → backup → free Gemma failover)...');
     await saveAISettings(aiSettings);
     const result = await testOpenRouterConnection(
       aiSettings.openRouterApiKey,
       aiSettings.openRouterBaseUrl,
       aiSettings.openRouterModelId,
       aiSettings.openRouterBackupModelId,
+      aiSettings.openRouterTertiaryModelId,
     );
     setOnlineStatus(result.message);
     setTestingOnline(false);
+  };
+
+  const handleTestGoogle = async () => {
+    setTestingGoogle(true);
+    setGoogleStatus('Testing Google AI Studio free Gemma path...');
+    await saveAISettings(aiSettings);
+    const result = await testGoogleAiConnection(
+      aiSettings.googleAiApiKey,
+      aiSettings.googleAiModelId,
+    );
+    setGoogleStatus(result.message);
+    setTestingGoogle(false);
   };
 
   const handleTestOffline = async () => {
@@ -1551,7 +2213,7 @@ function ModelPanel({
         <>
           {/* Online */}
           <div className="mt-5 border-t border-zinc-200 pt-4">
-            <p className="label mb-2">1. Online Mode — OpenRouter Gemma</p>
+            <p className="label mb-2">1. Online Mode — OpenRouter Gemma (+ free failover)</p>
             <div className="grid gap-2">
               <Field
                 label="OpenRouter API Key"
@@ -1574,13 +2236,20 @@ function ModelPanel({
                 />
               </div>
               <Field
+                label="Tertiary free model (used on 429 / provider error)"
+                value={aiSettings.openRouterTertiaryModelId || DEFAULT_AI_SETTINGS.openRouterTertiaryModelId}
+                onChange={(val) => setAiSettings((prev) => ({ ...prev, openRouterTertiaryModelId: val }))}
+                placeholder="google/gemma-4-31b-it:free"
+              />
+              <Field
                 label="Base URL"
                 value={aiSettings.openRouterBaseUrl}
                 onChange={(val) => setAiSettings((prev) => ({ ...prev, openRouterBaseUrl: val }))}
                 placeholder="https://openrouter.ai/api/v1"
               />
               <p className="text-[11px] text-zinc-500">
-                Endpoint used: <span className="font-mono">{(aiSettings.openRouterBaseUrl || DEFAULT_AI_SETTINGS.openRouterBaseUrl).replace(/\/$/, '')}/chat/completions</span>
+                Endpoint: <span className="font-mono">{(aiSettings.openRouterBaseUrl || DEFAULT_AI_SETTINGS.openRouterBaseUrl).replace(/\/$/, '')}/chat/completions</span>
+                . On HTTP 429 / “Provider returned error”, the app retries with backoff, shows the full raw error body, then fails over across free Gemma models.
               </p>
               <div className="flex flex-wrap items-center gap-2">
                 <button
@@ -1593,8 +2262,46 @@ function ModelPanel({
                 </button>
               </div>
               {onlineStatus && (
-                <pre className={`whitespace-pre-wrap border border-zinc-200 bg-stone-50 px-3 py-2 text-[11px] ${statusColor(onlineStatus)}`}>
+                <pre className={`max-h-64 overflow-auto whitespace-pre-wrap border border-zinc-200 bg-stone-50 px-3 py-2 text-[11px] ${statusColor(onlineStatus)}`}>
                   {onlineStatus}
+                </pre>
+              )}
+            </div>
+          </div>
+
+          {/* Google AI Studio free alternative */}
+          <div className="mt-5 border-t border-zinc-200 pt-4">
+            <p className="label mb-2">1b. Free alternate online provider — Google AI Studio (Gemma)</p>
+            <div className="grid gap-2">
+              <p className="text-[11px] text-zinc-500">
+                When OpenRouter free models are rate-limited, ONLINE/HYBRID automatically tries this free Google AI Studio path.
+                Create a key at <span className="font-mono">https://aistudio.google.com/apikey</span>
+              </p>
+              <Field
+                label="Google AI Studio API Key"
+                value={aiSettings.googleAiApiKey || ''}
+                onChange={(val) => setAiSettings((prev) => ({ ...prev, googleAiApiKey: val }))}
+                placeholder="AIza..."
+              />
+              <Field
+                label="Google model ID"
+                value={aiSettings.googleAiModelId || DEFAULT_AI_SETTINGS.googleAiModelId}
+                onChange={(val) => setAiSettings((prev) => ({ ...prev, googleAiModelId: val }))}
+                placeholder="gemma-3-27b-it"
+              />
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  className="btn-primary text-xs"
+                  onClick={handleTestGoogle}
+                  disabled={testingGoogle || !aiSettings.googleAiApiKey?.trim()}
+                >
+                  <RefreshCw className={`h-3 w-3 ${testingGoogle ? 'animate-spin' : ''}`} />
+                  {testingGoogle ? 'Testing...' : 'Test Google AI'}
+                </button>
+              </div>
+              {googleStatus && (
+                <pre className={`max-h-64 overflow-auto whitespace-pre-wrap border border-zinc-200 bg-stone-50 px-3 py-2 text-[11px] ${statusColor(googleStatus)}`}>
+                  {googleStatus}
                 </pre>
               )}
             </div>
@@ -1610,12 +2317,19 @@ function ModelPanel({
                   Paste a Hugging Face GGUF model link → download it to your computer → Test Offline → chat fully offline.
                   LetsDoIT stores the file under your app data folder and starts a local engine automatically.
                 </p>
+                <p className="mt-2">
+                  <strong>Manual install:</strong> if download fails, download a .gguf in your browser, then Import GGUF below
+                  or paste the full path and click Register path. Use “Open models folder” to verify files on disk.
+                </p>
               </div>
 
               {!isDesktopRuntime() && (
                 <div className="border border-amber-300 bg-amber-50 px-3 py-3 text-[11px] leading-5 text-amber-950">
                   <p className="font-bold">Desktop app required for offline models</p>
-                  <p className="mt-1">Open the Windows installer build (LetsDoIT.exe) to download models from Hugging Face onto disk.</p>
+                  <p className="mt-1">
+                    Use the Windows installer (LetsDoIT_0.1.0_x64-setup.exe) or MSI under{' '}
+                    <span className="font-mono">src-tauri/target/release/bundle/</span> so models can be downloaded or imported onto disk.
+                  </p>
                 </div>
               )}
 
@@ -1641,6 +2355,124 @@ function ModelPanel({
                   <Download className="h-3 w-3" />
                   {downloadingId === hfUrlDraft.trim() ? 'Downloading...' : 'Download from Hugging Face'}
                 </button>
+                <button
+                  className="btn-ghost text-xs"
+                  type="button"
+                  disabled={!isDesktopRuntime()}
+                  onClick={async () => {
+                    try {
+                      const path = await openModelsFolder();
+                      setOfflineStatus(`Opened models folder:\n${path}`);
+                    } catch (error) {
+                      setOfflineStatus(error instanceof Error ? error.message : String(error));
+                    }
+                  }}
+                >
+                  Open models folder
+                </button>
+              </div>
+
+              <div className="border border-zinc-200 bg-stone-50 p-3">
+                <p className="text-[11px] font-bold uppercase tracking-wide text-zinc-500">Manual GGUF import</p>
+                <p className="mt-1 text-[11px] text-zinc-600">
+                  Download e.g. <span className="font-mono">gemma-2-2b-it-Q4_K_M.gguf</span> from Hugging Face in your browser,
+                  then import the file here (works when in-app download fails).
+                </p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <input
+                    ref={manualFileInput}
+                    type="file"
+                    accept=".gguf"
+                    className="input text-xs"
+                    onChange={async (event) => {
+                      const file = event.target.files?.[0];
+                      if (!file) return;
+                      // Browser File has no path in web; desktop WebView may expose path via webkitRelative or name only.
+                      // Prefer path draft: user can also paste absolute path.
+                      const maybePath = (file as File & { path?: string }).path;
+                      if (maybePath) {
+                        setManualPathDraft(maybePath);
+                        const result = await importLocalGguf(maybePath);
+                        setOfflineStatus(result.message);
+                        if (result.ok && result.path) {
+                          setModel((prev) => ({
+                            ...prev,
+                            provider: 'huggingface',
+                            modelName: result.name || file.name,
+                            localPath: result.path,
+                            downloadStatus: 'downloaded',
+                            downloadProgress: 100,
+                            connected: false,
+                          }));
+                          await refreshInstalled();
+                        }
+                      } else {
+                        setOfflineStatus(
+                          `Selected file: ${file.name}\n\n` +
+                            `This environment did not expose the full disk path.\n` +
+                            `Paste the absolute path to the .gguf below and click Register / Import.`,
+                        );
+                        setManualPathDraft(file.name);
+                      }
+                      event.target.value = '';
+                    }}
+                  />
+                </div>
+                <Field
+                  label="Absolute path to .gguf on this PC"
+                  value={manualPathDraft}
+                  onChange={setManualPathDraft}
+                  placeholder="D:\\models\\gemma-2-2b-it-Q4_K_M.gguf"
+                />
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <button
+                    className="btn-primary text-xs"
+                    type="button"
+                    disabled={!isDesktopRuntime() || !manualPathDraft.trim()}
+                    onClick={async () => {
+                      const result = await importLocalGguf(manualPathDraft.trim());
+                      setOfflineStatus(result.message);
+                      if (result.ok && result.path) {
+                        setModel((prev) => ({
+                          ...prev,
+                          provider: 'huggingface',
+                          modelName: result.name || prev.modelName,
+                          localPath: result.path,
+                          downloadStatus: 'downloaded',
+                          downloadProgress: 100,
+                          connected: false,
+                          endpoint: 'http://127.0.0.1:3928',
+                        }));
+                        await refreshInstalled();
+                      }
+                    }}
+                  >
+                    Import into app folder
+                  </button>
+                  <button
+                    className="btn-ghost text-xs"
+                    type="button"
+                    disabled={!isDesktopRuntime() || !manualPathDraft.trim()}
+                    onClick={async () => {
+                      const result = await registerExternalGguf(manualPathDraft.trim());
+                      setOfflineStatus(result.message);
+                      if (result.ok && result.path) {
+                        setModel((prev) => ({
+                          ...prev,
+                          provider: 'huggingface',
+                          modelName: result.name || prev.modelName,
+                          localPath: result.path,
+                          downloadStatus: 'downloaded',
+                          downloadProgress: 100,
+                          connected: false,
+                          endpoint: 'http://127.0.0.1:3928',
+                        }));
+                      }
+                    }}
+                  >
+                    Register path (no copy)
+                  </button>
+                </div>
               </div>
 
               {downloadingId && (
@@ -2122,7 +2954,7 @@ function QuizEditor(props: {
           <p className="label">Quiz editor — review before publishing</p>
           <div className="mt-3 grid grid-cols-3 gap-3 max-w-lg">
             <Field label="Quiz title" value={quiz.title} onChange={(v) => setQuiz((p) => ({ ...p, title: v }))} />
-            <Select label="Difficulty" value={quiz.difficulty} onChange={(v) => setQuiz((p) => ({ ...p, difficulty: v as Quiz['difficulty'] }))} options={['easy', 'medium', 'hard'].map((d) => ({ label: d, value: d }))} />
+            <Select label="Difficulty" value={quiz.difficulty === 'medium' ? 'moderate' : quiz.difficulty} onChange={(v) => setQuiz((p) => ({ ...p, difficulty: v as Quiz['difficulty'] }))} options={['easy', 'moderate', 'hard'].map((d) => ({ label: d, value: d }))} />
             <Select label="Mode" value={quiz.isTestMode ? 'official' : 'practice'} onChange={(v) => setQuiz((p) => ({ ...p, isTestMode: v === 'official' }))} options={[{ label: 'Practice', value: 'practice' }, { label: 'Official test', value: 'official' }]} />
           </div>
           {quiz.isTestMode && (

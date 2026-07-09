@@ -31,6 +31,12 @@ export default defineConfig(() => {
           changeOrigin: true,
           rewrite: (p) => p.replace(/^\/__proxy\/ollama/, ''),
         },
+        '/__proxy/googleai': {
+          target: 'https://generativelanguage.googleapis.com',
+          changeOrigin: true,
+          secure: true,
+          rewrite: (p) => p.replace(/^\/__proxy\/googleai/, ''),
+        },
       },
     },
   };
