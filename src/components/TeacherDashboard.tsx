@@ -144,6 +144,7 @@ How can I assist your teaching planning today?`,
       teacherName: profile.name,
       teacherId: profile.id,
       enrolledCount: 0,
+      enrolledStudentIds: [],
     };
 
     onAddCourse(newCourse);

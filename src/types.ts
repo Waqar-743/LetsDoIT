@@ -5,6 +5,8 @@
 
 export type AIMode = 'OFFLINE' | 'ONLINE' | 'HYBRID';
 
+export type LanguageStyle = 'en' | 'urdu-en';
+
 export type UserRole = 'STUDENT' | 'TEACHER' | null;
 
 export type PreparationLevel = 
@@ -33,6 +35,7 @@ export interface Course {
   teacherName: string;
   teacherId: string;
   enrolledCount: number;
+  enrolledStudentIds: string[];
 }
 
 export interface CourseMaterial {
@@ -46,8 +49,12 @@ export interface CourseMaterial {
   contentSummary: string;
   topic?: string;
   contentText?: string;
+  importantPoints?: string[];
+  studyHelp?: string;
   lessonMap?: LessonMapItem[];
   contentHash?: string;
+  aiProcessed?: boolean;
+  extractWarning?: string;
 }
 
 export interface LessonMapItem {
@@ -66,6 +73,7 @@ export interface Quiz {
   timeLimit: number; // in minutes
   isTestMode: boolean; // True = Official Test, False = Practice Quiz
   isPublished: boolean;
+  isDraft?: boolean; // True = teacher is reviewing/editing, not yet published
   dueDate?: string;
   questions: QuizQuestion[];
 }
@@ -134,6 +142,7 @@ export interface ChatMessage {
   timestamp: string;
   modeUsed?: AIMode;
   quizRefId?: string;
+  languageStyle?: LanguageStyle;
 }
 
 export interface SystemLog {
@@ -159,4 +168,31 @@ export interface AIProviderResult {
   modeUsed: AIMode;
   providerName: string;
   fromCache: boolean;
+}
+
+export interface PracticeSet {
+  id: string;
+  studentId: string;
+  courseId: string;
+  courseTitle: string;
+  basedOnAttemptId: string;
+  generatedAt: string;
+  focusTopics: string[];
+  difficulty: 'easy' | 'medium' | 'hard';
+  targetMistakeTypes: MistakeType[];
+  description: string;
+  questions: PracticeQuestion[];
+  completed: boolean;
+  completedAt?: string;
+}
+
+export interface PracticeQuestion {
+  id: string;
+  text: string;
+  hint: string;
+  options?: string[];
+  correctAnswer: string;
+  explanation: string;
+  topicTag: string;
+  mistakeType: MistakeType;
 }

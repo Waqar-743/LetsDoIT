@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Course, CourseMaterial, Quiz, QuizAttempt, StudentProfile, SystemLog } from './types';
+import { Course, CourseMaterial, PracticeSet, Quiz, QuizAttempt, StudentProfile, SystemLog } from './types';
 
 export const INITIAL_COURSES: Course[] = [
   {
@@ -17,6 +17,7 @@ export const INITIAL_COURSES: Course[] = [
     teacherName: 'Prof. Dr. Tariq Shah',
     teacherId: 't1',
     enrolledCount: 42,
+    enrolledStudentIds: ['s1'],
   },
   {
     id: 'c2',
@@ -29,6 +30,7 @@ export const INITIAL_COURSES: Course[] = [
     teacherName: 'Assoc. Prof. Sarah Khan',
     teacherId: 't2',
     enrolledCount: 35,
+    enrolledStudentIds: ['s1'],
   },
   {
     id: 'c3',
@@ -41,6 +43,7 @@ export const INITIAL_COURSES: Course[] = [
     teacherName: 'Dr. Asim Jamil',
     teacherId: 't3',
     enrolledCount: 28,
+    enrolledStudentIds: [],
   },
 ];
 
@@ -303,3 +306,5 @@ export const INITIAL_SYSTEM_LOGS: SystemLog[] = [
     role: 'SYSTEM',
   },
 ];
+
+export const INITIAL_PRACTICE_SETS: PracticeSet[] = [];
