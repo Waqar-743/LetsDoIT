@@ -154,11 +154,20 @@ export interface SystemLog {
 }
 
 export interface LocalModelState {
-  provider: 'ollama' | 'llama.cpp' | 'mistral.rs';
+  /** Offline engine: Hugging Face GGUF on disk + managed local runtime */
+  provider: 'huggingface' | 'llama.cpp';
+  /** Display name / GGUF filename stem */
   modelName: string;
+  /** Full Hugging Face page or resolve URL the user pasted */
+  hfUrl?: string;
+  /** Absolute path to downloaded .gguf on this machine */
+  localPath?: string;
+  /** Optional Hugging Face access token (gated models like official Gemma) */
+  hfToken?: string;
   downloadStatus: 'not_downloaded' | 'downloading' | 'downloaded';
   downloadProgress: number;
   connected: boolean;
+  /** Local OpenAI-compatible endpoint started by the app (not Ollama) */
   endpoint: string;
   lastChecked?: string;
 }

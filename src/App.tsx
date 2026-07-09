@@ -47,24 +47,30 @@ import {
   createLessonMap,
   DEFAULT_AI_SETTINGS,
   diagnoseOfflineMistake,
-  DOWNLOADABLE_GEMMA_MODELS,
   generateOfflineQuiz,
   generatePracticeSet,
   hashContent,
   loadAISettings,
   processMaterialWithAI,
-  pullOllamaModel,
   saveAISettings,
-  testOfflineModel,
-  testOllamaConnection,
   testOpenRouterConnection,
 } from './services/ai';
 import {
   DesktopEnvironment,
   getDesktopEnvironment,
+  isDesktopRuntime,
   loadDesktopModelState,
   saveDesktopModelState,
 } from './services/desktop';
+import {
+  downloadHfModel,
+  formatBytes,
+  HF_GEMMA_PRESETS,
+  listLocalGgufModels,
+  stopOfflineRuntime,
+  testOfflineHfModel,
+  type LocalGgufModel,
+} from './services/localModel';
 import { extractTextFromFile } from './services/pdf';
 import {
   INITIAL_ATTEMPTS,
@@ -84,13 +90,41 @@ const router = new AutoGemmaRouter();
 const nowStamp = () => new Date().toISOString().replace('T', ' ').slice(0, 16);
 
 const defaultModel: LocalModelState = {
-  provider: 'ollama',
-  modelName: 'gemma2:2b',
+  provider: 'huggingface',
+  modelName: 'gemma-2-2b-it-Q4_K_M.gguf',
+  hfUrl: 'https://huggingface.co/bartowski/gemma-2-2b-it-GGUF',
+  localPath: '',
+  hfToken: '',
   downloadStatus: 'not_downloaded',
   downloadProgress: 0,
   connected: false,
-  endpoint: 'http://localhost:11434',
+  endpoint: 'http://127.0.0.1:3928',
 };
+
+/** Migrate older Ollama-based saved state to Hugging Face offline */
+function normalizeModelState(raw: LocalModelState | null | undefined): LocalModelState {
+  if (!raw) return { ...defaultModel };
+  const legacy = raw as LocalModelState & { provider?: string };
+  const providerName = String(legacy.provider || '');
+  const isLegacyOllama =
+    providerName === 'ollama' ||
+    (legacy.endpoint || '').includes('11434') ||
+    (legacy.modelName || '').includes(':');
+  return {
+    ...defaultModel,
+    ...legacy,
+    provider: 'huggingface',
+    endpoint:
+      isLegacyOllama || !legacy.endpoint || legacy.endpoint.includes('11434')
+        ? 'http://127.0.0.1:3928'
+        : legacy.endpoint,
+    // Force re-connect after migration
+    connected: isLegacyOllama ? false : Boolean(legacy.connected && legacy.localPath),
+    localPath: legacy.localPath || '',
+    hfUrl: legacy.hfUrl || defaultModel.hfUrl,
+    hfToken: legacy.hfToken || '',
+  };
+}
 
 const uid = (prefix: string) => `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2, 7)}`;
 
@@ -191,7 +225,7 @@ function App() {
   const [attempts, setAttempts] = useStoredState<QuizAttempt[]>('letsdoit_attempts_v2', INITIAL_ATTEMPTS);
   const [practiceSets, setPracticeSets] = useStoredState<PracticeSet[]>('letsdoit_practice_v1', []);
   const [logs, setLogs] = useStoredState<SystemLog[]>('letsdoit_logs_v2', INITIAL_SYSTEM_LOGS);
-  const [model, setModel] = useStoredState<LocalModelState>('letsdoit_model_v2', defaultModel);
+  const [model, setModel] = useStoredState<LocalModelState>('letsdoit_model_v3', defaultModel);
   const [aiSettings, setAiSettings] = useStoredState<AISettings>('letsdoit_ai_settings_v2', DEFAULT_AI_SETTINGS);
   const [desktopEnv, setDesktopEnv] = useState<DesktopEnvironment | null>(null);
   const [desktopModelReady, setDesktopModelReady] = useState(false);
@@ -209,7 +243,7 @@ function App() {
         if (!mounted) return;
         setDesktopEnv(environment);
         if (storedModel) {
-          setModel(storedModel);
+          setModel(normalizeModelState(storedModel));
         }
         if (storedSettings) {
           setAiSettings((prev) => ({ ...DEFAULT_AI_SETTINGS, ...prev, ...storedSettings }));
@@ -1304,33 +1338,41 @@ function ModelPanel({
   const [testingOnline, setTestingOnline] = useState(false);
   const [offlineStatus, setOfflineStatus] = useState<string | null>(null);
   const [onlineStatus, setOnlineStatus] = useState<string | null>(null);
-  const [installedModels, setInstalledModels] = useState<string[]>([]);
-  const [ollamaOnline, setOllamaOnline] = useState<boolean | null>(null);
+  const [localModels, setLocalModels] = useState<LocalGgufModel[]>([]);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [downloadDetail, setDownloadDetail] = useState<string | null>(null);
-  const pullAbort = useRef<AbortController | null>(null);
+  const [hfUrlDraft, setHfUrlDraft] = useState(model.hfUrl || HF_GEMMA_PRESETS[0]?.hfUrl || '');
+  const [hfTokenDraft, setHfTokenDraft] = useState(model.hfToken || '');
 
   const refreshInstalled = async () => {
-    const result = await testOllamaConnection(model.endpoint || 'http://localhost:11434');
-    setOllamaOnline(result.ok);
-    if (result.ok) {
-      setInstalledModels(result.allModels || result.models || []);
-    } else {
-      setInstalledModels([]);
+    if (!isDesktopRuntime()) {
+      setLocalModels([]);
+      return { ok: false as const, message: 'Desktop app required for offline Hugging Face models.' };
     }
-    return result;
+    try {
+      const models = await listLocalGgufModels();
+      setLocalModels(models);
+      return {
+        ok: true as const,
+        message:
+          models.length > 0
+            ? `Found ${models.length} local GGUF model(s) on this computer.`
+            : 'No local models yet. Paste a Hugging Face link and download one.',
+      };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      setLocalModels([]);
+      return { ok: false as const, message: msg };
+    }
   };
 
   useEffect(() => {
     void refreshInstalled();
-    return () => {
-      pullAbort.current?.abort();
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [model.endpoint]);
+  }, []);
 
-  const isInstalled = (name: string) =>
-    installedModels.some((m) => m === name || m.startsWith(`${name}:`) || m.startsWith(`${name}-`) || m.startsWith(name));
+  const isInstalled = (filename: string) =>
+    localModels.some((m) => m.name === filename || m.path.endsWith(filename));
 
   const handleTestOnline = async () => {
     setTestingOnline(true);
@@ -1348,15 +1390,28 @@ function ModelPanel({
 
   const handleTestOffline = async () => {
     setTestingOffline(true);
-    setOfflineStatus('Testing offline model...');
-    const result = await testOfflineModel(model.endpoint || 'http://localhost:11434', model.modelName);
+    setOfflineStatus('Starting local offline runtime (no Ollama)...');
+    if (!isDesktopRuntime()) {
+      setOfflineStatus('Offline Hugging Face mode works in the desktop installer / LetsDoIT.exe only.');
+      setTestingOffline(false);
+      return;
+    }
+    if (!model.localPath) {
+      setOfflineStatus('No local model path selected.\nDownload a GGUF from Hugging Face first, then test again.');
+      setModel((prev) => ({ ...prev, connected: false }));
+      setTestingOffline(false);
+      return;
+    }
+    const result = await testOfflineHfModel(model.localPath);
     setOfflineStatus(result.message);
     if (result.ok) {
       setModel((prev) => ({
         ...prev,
+        provider: 'huggingface',
         connected: true,
         downloadStatus: 'downloaded',
         downloadProgress: 100,
+        endpoint: 'http://127.0.0.1:3928',
         lastChecked: nowStamp(),
       }));
       await refreshInstalled();
@@ -1366,66 +1421,83 @@ function ModelPanel({
     setTestingOffline(false);
   };
 
-  const handleSelectInstalled = (name: string) => {
+  const handleSelectInstalled = (item: LocalGgufModel) => {
     setModel((prev) => ({
       ...prev,
-      modelName: name,
+      provider: 'huggingface',
+      modelName: item.name,
+      localPath: item.path,
       downloadStatus: 'downloaded',
       downloadProgress: 100,
-      connected: true,
+      connected: false,
+      endpoint: 'http://127.0.0.1:3928',
       lastChecked: nowStamp(),
     }));
-    setOfflineStatus(`Selected offline model: ${name}`);
+    setOfflineStatus(`Selected local model:\n${item.name}\n${item.path}\n\nClick Test Offline Model to connect.`);
   };
 
-  const handleDownload = async (name: string) => {
+  const runHfDownload = async (urlOrRepo: string, filename?: string, label?: string) => {
     if (downloadingId) return;
-    pullAbort.current?.abort();
-    const controller = new AbortController();
-    pullAbort.current = controller;
-    setDownloadingId(name);
-    setDownloadDetail(`Starting download of ${name}...`);
+    if (!isDesktopRuntime()) {
+      setOfflineStatus('Install / open the desktop app to download Hugging Face models onto this PC.');
+      return;
+    }
+    const id = label || filename || urlOrRepo;
+    setDownloadingId(id);
+    setDownloadDetail(`Resolving ${urlOrRepo}...`);
     setModel((prev) => ({
       ...prev,
-      modelName: name,
+      provider: 'huggingface',
+      hfUrl: urlOrRepo,
+      hfToken: hfTokenDraft,
+      modelName: filename || prev.modelName,
       downloadStatus: 'downloading',
       downloadProgress: 0,
       connected: false,
     }));
 
-    const result = await pullOllamaModel(
-      model.endpoint || 'http://localhost:11434',
-      name,
-      (progress) => {
-        setDownloadDetail(`${progress.status}${progress.detail ? ` · ${progress.detail}` : ''}`);
+    const result = await downloadHfModel({
+      urlOrRepo,
+      filename,
+      hfToken: hfTokenDraft,
+      onProgress: (progress) => {
+        setDownloadDetail(
+          `${progress.status}${progress.detail ? ` · ${progress.detail}` : ''}${
+            progress.totalBytes
+              ? ` · ${formatBytes(progress.downloadedBytes)} / ${formatBytes(progress.totalBytes)}`
+              : ''
+          }`,
+        );
         setModel((prev) => ({
           ...prev,
           downloadStatus: 'downloading',
           downloadProgress: progress.percent,
-          modelName: name,
         }));
       },
-      controller.signal,
-    );
+    });
 
-    if (result.ok) {
+    if (result.ok && result.path) {
       setModel((prev) => ({
         ...prev,
-        modelName: name,
+        provider: 'huggingface',
+        modelName: result.name || filename || prev.modelName,
+        localPath: result.path,
+        hfUrl: urlOrRepo,
+        hfToken: hfTokenDraft,
         downloadStatus: 'downloaded',
         downloadProgress: 100,
-        connected: true,
+        connected: false,
+        endpoint: 'http://127.0.0.1:3928',
         lastChecked: nowStamp(),
       }));
       setDownloadDetail(result.message);
-      setOfflineStatus(result.message + '\nAuto-connected. Run Test Offline Model to verify generation.');
+      setOfflineStatus(`${result.message}\n\nClick Test Offline Model to load it fully offline.`);
       await refreshInstalled();
     } else {
       setModel((prev) => ({
         ...prev,
-        downloadStatus: 'not_downloaded',
-        downloadProgress: 0,
-        connected: false,
+        downloadStatus: prev.localPath ? 'downloaded' : 'not_downloaded',
+        downloadProgress: prev.localPath ? 100 : 0,
       }));
       setDownloadDetail(result.message);
       setOfflineStatus(result.message);
@@ -1528,40 +1600,70 @@ function ModelPanel({
             </div>
           </div>
 
-          {/* Offline */}
+          {/* Offline — Hugging Face direct download (no Ollama) */}
           <div className="mt-5 border-t border-zinc-200 pt-4">
-            <p className="label mb-2">2. Offline Mode — Local Gemma (Ollama)</p>
+            <p className="label mb-2">2. Offline Mode — Hugging Face model on this PC</p>
             <div className="grid gap-3">
+              <div className="border border-emerald-200 bg-emerald-50 px-3 py-3 text-[11px] leading-5 text-emerald-950">
+                <p className="font-bold">No Ollama install required</p>
+                <p className="mt-1">
+                  Paste a Hugging Face GGUF model link → download it to your computer → Test Offline → chat fully offline.
+                  LetsDoIT stores the file under your app data folder and starts a local engine automatically.
+                </p>
+              </div>
+
+              {!isDesktopRuntime() && (
+                <div className="border border-amber-300 bg-amber-50 px-3 py-3 text-[11px] leading-5 text-amber-950">
+                  <p className="font-bold">Desktop app required for offline models</p>
+                  <p className="mt-1">Open the Windows installer build (LetsDoIT.exe) to download models from Hugging Face onto disk.</p>
+                </div>
+              )}
+
               <Field
-                label="Ollama endpoint"
-                value={model.endpoint}
-                onChange={(val) => {
-                  setModel((prev) => ({ ...prev, endpoint: val }));
-                  setAiSettings((prev) => ({ ...prev, localEndpoint: val }));
-                }}
-                placeholder="http://localhost:11434"
+                label="Hugging Face model link or repo"
+                value={hfUrlDraft}
+                onChange={setHfUrlDraft}
+                placeholder="https://huggingface.co/bartowski/gemma-2-2b-it-GGUF"
+              />
+              <Field
+                label="Hugging Face token (optional — only for gated models)"
+                value={hfTokenDraft}
+                onChange={setHfTokenDraft}
+                placeholder="hf_... (leave empty for public GGUF repos)"
               />
 
-              {ollamaOnline === false && (
-                <div className="border border-amber-300 bg-amber-50 px-3 py-3 text-[11px] leading-5 text-amber-950">
-                  <p className="font-bold">Ollama is not installed or not running</p>
-                  <ol className="mt-2 list-decimal space-y-1 pl-4">
-                    <li>Download and install Ollama from https://ollama.com</li>
-                    <li>Start the Ollama app (it should appear in the system tray)</li>
-                    <li>Return here and download a Gemma model below</li>
-                    <li>Click Test Offline Model</li>
-                  </ol>
-                  <p className="mt-2 font-mono">Expected endpoint: http://localhost:11434</p>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  className="btn-primary text-xs"
+                  disabled={Boolean(downloadingId) || !hfUrlDraft.trim()}
+                  onClick={() => void runHfDownload(hfUrlDraft.trim())}
+                >
+                  <Download className="h-3 w-3" />
+                  {downloadingId === hfUrlDraft.trim() ? 'Downloading...' : 'Download from Hugging Face'}
+                </button>
+              </div>
+
+              {downloadingId && (
+                <div>
+                  <div className="h-1.5 overflow-hidden bg-zinc-200">
+                    <div
+                      className="h-full bg-emerald-500 transition-all"
+                      style={{ width: `${model.downloadProgress || 0}%` }}
+                    />
+                  </div>
+                  <p className="mt-1 text-[10px] text-zinc-500">
+                    {model.downloadProgress || 0}% · {downloadDetail || 'Downloading...'}
+                  </p>
                 </div>
               )}
 
               <div>
-                <p className="mb-2 text-[11px] font-bold uppercase tracking-wide text-zinc-500">Download Gemma models</p>
+                <p className="mb-2 text-[11px] font-bold uppercase tracking-wide text-zinc-500">Quick presets (public GGUF)</p>
                 <div className="grid gap-2">
-                  {DOWNLOADABLE_GEMMA_MODELS.map((item) => {
-                    const installed = isInstalled(item.name);
-                    const selected = model.modelName === item.name || model.modelName.startsWith(item.name);
-                    const downloading = downloadingId === item.name;
+                  {HF_GEMMA_PRESETS.map((item) => {
+                    const installed = isInstalled(item.filename);
+                    const selected = model.modelName === item.filename || model.localPath?.endsWith(item.filename);
+                    const downloading = downloadingId === item.id || downloadingId === item.filename;
                     return (
                       <div
                         key={item.id}
@@ -1570,35 +1672,43 @@ function ModelPanel({
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-2">
                             <p className="text-sm font-black">{item.label}</p>
-                            <span className="font-mono text-[10px] text-zinc-500">{item.name}</span>
-                            {installed && <span className="tag text-[10px]">Installed</span>}
-                            {selected && model.connected && <span className="tag text-[10px]">Selected</span>}
+                            <span className="font-mono text-[10px] text-zinc-500">{item.filename}</span>
+                            {installed && <span className="tag text-[10px]">On disk</span>}
+                            {selected && model.connected && <span className="tag text-[10px]">Connected</span>}
                           </div>
                           <p className="mt-1 text-[11px] text-zinc-600">{item.description} · {item.sizeHint}</p>
-                          {downloading && (
-                            <div className="mt-2">
-                              <div className="h-1.5 overflow-hidden bg-zinc-200">
-                                <div
-                                  className="h-full bg-emerald-500 transition-all"
-                                  style={{ width: `${model.downloadProgress || 0}%` }}
-                                />
-                              </div>
-                              <p className="mt-1 text-[10px] text-zinc-500">
-                                {model.downloadProgress || 0}% · {downloadDetail || 'Downloading...'}
-                              </p>
-                            </div>
-                          )}
+                          <a
+                            className="mt-1 inline-block font-mono text-[10px] text-blue-700 underline"
+                            href={item.hfUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {item.hfUrl}
+                          </a>
                         </div>
                         <div className="flex shrink-0 gap-2">
                           {installed ? (
-                            <button className="btn-ghost text-xs" onClick={() => handleSelectInstalled(item.name)}>
-                              {selected && model.connected ? 'Selected' : 'Use'}
+                            <button
+                              className="btn-ghost text-xs"
+                              onClick={() => {
+                                const found = localModels.find((m) => m.name === item.filename);
+                                if (found) handleSelectInstalled(found);
+                                else {
+                                  setHfUrlDraft(item.hfUrl);
+                                  void runHfDownload(item.repo, item.filename, item.id);
+                                }
+                              }}
+                            >
+                              {selected && model.connected ? 'Connected' : 'Use'}
                             </button>
                           ) : (
                             <button
                               className="btn-primary text-xs"
-                              disabled={Boolean(downloadingId) || ollamaOnline === false}
-                              onClick={() => void handleDownload(item.name)}
+                              disabled={Boolean(downloadingId)}
+                              onClick={() => {
+                                setHfUrlDraft(item.hfUrl);
+                                void runHfDownload(item.repo, item.filename, item.id);
+                              }}
                             >
                               <Download className="h-3 w-3" />
                               {downloading ? 'Downloading...' : 'Download'}
@@ -1611,21 +1721,28 @@ function ModelPanel({
                 </div>
               </div>
 
-              {installedModels.length > 0 && (
+              {localModels.length > 0 && (
                 <div>
-                  <p className="mb-2 text-[11px] font-bold uppercase tracking-wide text-zinc-500">Installed models</p>
-                  <div className="flex flex-wrap gap-1">
-                    {installedModels.map((name) => (
+                  <p className="mb-2 text-[11px] font-bold uppercase tracking-wide text-zinc-500">Downloaded on this computer</p>
+                  <div className="grid gap-1">
+                    {localModels.map((item) => (
                       <button
-                        key={name}
-                        className={`tag cursor-pointer text-[10px] ${model.modelName === name ? 'bg-emerald-100' : 'hover:bg-zinc-200'}`}
-                        onClick={() => handleSelectInstalled(name)}
+                        key={item.path}
+                        className={`flex items-center justify-between border px-3 py-2 text-left text-[11px] ${
+                          model.localPath === item.path ? 'border-emerald-500 bg-emerald-50' : 'border-zinc-200 hover:bg-zinc-50'
+                        }`}
+                        onClick={() => handleSelectInstalled(item)}
                       >
-                        {name}{model.modelName === name ? ' · selected' : ''}
+                        <span className="font-mono font-bold">{item.name}</span>
+                        <span className="text-zinc-500">{item.sizeLabel}</span>
                       </button>
                     ))}
                   </div>
                 </div>
+              )}
+
+              {model.localPath && (
+                <p className="break-all font-mono text-[10px] text-zinc-500">Selected file: {model.localPath}</p>
               )}
 
               <div className="flex flex-wrap items-center gap-2">
@@ -1641,12 +1758,16 @@ function ModelPanel({
                   }}
                   disabled={testingOffline}
                 >
-                  Refresh list
+                  Refresh local files
                 </button>
                 {model.connected && (
                   <button
                     className="btn-ghost text-xs text-red-600"
-                    onClick={() => setModel((prev) => ({ ...prev, connected: false }))}
+                    onClick={() => {
+                      void stopOfflineRuntime();
+                      setModel((prev) => ({ ...prev, connected: false }));
+                      setOfflineStatus('Disconnected offline runtime.');
+                    }}
                   >
                     <CircleOff className="h-3 w-3" /> Disconnect
                   </button>
@@ -1663,8 +1784,8 @@ function ModelPanel({
 
           <div className="mt-4 border-t border-zinc-200 pt-3">
             <p className="text-xs text-zinc-500">
-              <strong>HYBRID mode</strong> tries Online first, then falls back to the local Ollama model.
-              After download, the model is saved as the selected offline model and used with no extra setup.
+              <strong>HYBRID mode</strong> tries Online (OpenRouter) first, then falls back to your downloaded Hugging Face GGUF on this PC.
+              Internet is only needed to download the model once — after that, offline chat stays local.
             </p>
           </div>
         </>

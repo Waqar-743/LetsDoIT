@@ -313,11 +313,11 @@ export const DEFAULT_AI_SETTINGS: AISettings = {
   openRouterModelId: 'google/gemma-4-26b-a4b-it:free',
   openRouterBackupModelId: 'google/gemma-4-31b-it:free',
   openRouterBaseUrl: 'https://openrouter.ai/api/v1',
-  localEndpoint: 'http://localhost:11434',
-  localModelName: 'gemma2:2b',
+  localEndpoint: 'http://127.0.0.1:3928',
+  localModelName: 'gemma-2-2b-it-Q4_K_M.gguf',
 };
 
-/** Catalog of Gemma models users can download via Ollama from the app. */
+/** @deprecated Use HF_GEMMA_PRESETS from localModel.ts — kept for older imports */
 export type DownloadableModel = {
   id: string;
   name: string;
@@ -326,36 +326,7 @@ export type DownloadableModel = {
   description: string;
 };
 
-export const DOWNLOADABLE_GEMMA_MODELS: DownloadableModel[] = [
-  {
-    id: 'gemma2:2b',
-    name: 'gemma2:2b',
-    label: 'Gemma 2 · 2B',
-    sizeHint: '~1.6 GB',
-    description: 'Fast, low-RAM. Best for laptops and quick offline help.',
-  },
-  {
-    id: 'gemma2:9b',
-    name: 'gemma2:9b',
-    label: 'Gemma 2 · 9B',
-    sizeHint: '~5.4 GB',
-    description: 'Stronger answers. Needs more RAM and disk space.',
-  },
-  {
-    id: 'gemma3:1b',
-    name: 'gemma3:1b',
-    label: 'Gemma 3 · 1B',
-    sizeHint: '~800 MB',
-    description: 'Lightest option. Good for weak hardware and quick tests.',
-  },
-  {
-    id: 'gemma3:4b',
-    name: 'gemma3:4b',
-    label: 'Gemma 3 · 4B',
-    sizeHint: '~3.3 GB',
-    description: 'Balanced quality and speed for classroom use.',
-  },
-];
+export { HF_GEMMA_PRESETS as DOWNLOADABLE_GEMMA_MODELS } from './localModel';
 
 // ─── System prompts ───────────────────────────────────────────────────────────
 
@@ -404,7 +375,7 @@ async function readErrorBody(response: Response): Promise<string> {
 }
 
 function normalizeEndpoint(endpoint: string): string {
-  return (endpoint || 'http://localhost:11434').replace(/\/$/, '');
+  return (endpoint || 'http://127.0.0.1:3928').replace(/\/$/, '');
 }
 
 function normalizeOpenRouterBase(baseUrl: string): string {
@@ -466,67 +437,48 @@ export class LocalGemmaProvider {
     style: LanguageStyle,
     systemPrompt?: string,
   ): Promise<AIProviderResult> {
-    if (!model.connected) {
+    if (!model.connected || !model.localPath) {
       throw new Error(
-        'Local model is not connected.\n\n' +
-          '1. Install Ollama from https://ollama.com\n' +
-          '2. Start Ollama (it should run in the background)\n' +
-          '3. Open Model settings → download a Gemma model → click Test Offline Model',
+        'Local Hugging Face model is not connected.\n\n' +
+          '1. Open Model settings\n' +
+          '2. Paste a Hugging Face GGUF model link (or pick a preset)\n' +
+          '3. Download the model to this computer\n' +
+          '4. Click Test Offline Model',
       );
     }
 
-    const endpoint = normalizeEndpoint(model.endpoint);
-    const modelName = model.modelName || 'gemma2:2b';
     const system = systemPrompt || (style === 'urdu-en' ? URDU_ENGLISH_SYSTEM : ENGLISH_SYSTEM);
 
-    let response: Response;
     try {
-      response = await robustFetch(`${endpoint}/api/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: modelName,
-          messages: [
-            { role: 'system', content: system },
-            { role: 'user', content: prompt },
-          ],
-          stream: false,
-          options: {
-            temperature: 0.7,
-            top_p: 0.9,
-            num_predict: 1536,
-          },
-        } as OllamaChatRequest),
-        timeoutMs: 180_000,
+      // Ensure local runtime is up with the selected GGUF, then chat fully offline
+      const { ensureOfflineRuntime, offlineChat } = await import('./localModel');
+      const runtime = await ensureOfflineRuntime(model.localPath);
+      if (!runtime.running) {
+        throw new Error(runtime.message);
+      }
+      const result = await offlineChat({
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: prompt },
+        ],
+        maxTokens: 1536,
+        temperature: 0.7,
       });
+      return {
+        text: result.text || 'Local model returned an empty response.',
+        modeUsed: 'OFFLINE',
+        providerName: result.providerName || `Local HF (${model.modelName})`,
+        fromCache: false,
+      };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       throw new Error(
-        `Cannot reach Ollama at ${endpoint}.\n\n` +
-          `Error: ${msg}\n\n` +
-          `Install Ollama from https://ollama.com and make sure it is running, then retry.`,
+        `Offline Hugging Face model failed.\n\n` +
+          `Model: ${model.modelName}\n` +
+          `Path: ${model.localPath}\n\n` +
+          `Error: ${msg}`,
       );
     }
-
-    if (!response.ok) {
-      const body = await readErrorBody(response);
-      if (response.status === 404) {
-        throw new Error(
-          `Model "${modelName}" was not found on Ollama.\n\n` +
-            `Download it from Model settings, or run:\nollama pull ${modelName}\n\n` +
-            (body ? `Server detail: ${body}` : ''),
-        );
-      }
-      throw new Error(formatHttpError(response.status, body, 'Ollama chat'));
-    }
-
-    const data: OllamaChatResponse = await response.json();
-    return {
-      text: data.message?.content || 'Ollama returned an empty response.',
-      modeUsed: 'OFFLINE',
-      providerName: `Ollama (${modelName})`,
-      fromCache: false,
-    };
   }
 }
 
@@ -1134,7 +1086,7 @@ export class AutoGemmaRouter {
           throw new Error(
             `Online Gemma unavailable and local model is not connected.\n\n` +
               `Online error:\n${onlineMsg}\n\n` +
-              `Connect Ollama offline mode or fix your OpenRouter key, then retry.`,
+              `Download a Hugging Face GGUF offline model (Model settings) or fix your OpenRouter key, then retry.`,
           );
         }
       }

@@ -171,16 +171,20 @@ src-tauri/target/release/bundle/msi/LetsDoIT_0.1.0_x64_en-US.msi
 
 Desktop builds call OpenRouter through a **Rust HTTP proxy** (no WebView CORS drama). Browser dev uses a Vite proxy (`/__proxy/openrouter`).
 
-### 2. Offline — Ollama
+### 2. Offline — Hugging Face (no Ollama)
 
-1. Install and start [Ollama](https://ollama.com) (system tray on Windows).
-2. Endpoint: `http://localhost:11434`
-3. In Model settings → download a Gemma model (e.g. `gemma2:2b`).
-4. Click **Test Offline Model**.
+Offline mode does **not** use Ollama. You download a **GGUF** model from Hugging Face onto this PC:
+
+1. Open **Model** settings in the desktop app.
+2. Paste a Hugging Face link (or pick a preset), e.g.  
+   `https://huggingface.co/bartowski/gemma-2-2b-it-GGUF`
+3. Click **Download from Hugging Face** (optional HF token only for gated models).
+4. Click **Test Offline Model** — LetsDoIT starts a local engine automatically.
+5. After that, chat works **fully offline** from the file on disk.
 
 ### 3. Hybrid
 
-Pick **HYBRID** in the assistant mode control: online when available, local when not.
+Pick **HYBRID** in the assistant mode control: online when available, local Hugging Face model when not.
 
 ---
 
