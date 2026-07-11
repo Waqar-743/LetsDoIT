@@ -470,6 +470,11 @@ static OFFLINE_RUNTIME: Lazy<Mutex<OfflineRuntimeState>> = Lazy::new(|| {
     })
 });
 
+// Serialize install/start so simultaneous chats cannot launch competing
+// llama-server processes on the same port.
+static OFFLINE_START_LOCK: Lazy<tokio::sync::Mutex<()>> =
+    Lazy::new(|| tokio::sync::Mutex::new(()));
+
 fn models_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app_data_dir(app)?.join("models");
     fs::create_dir_all(&dir).map_err(|e| format!("Unable to create models dir: {e}"))?;
@@ -992,11 +997,19 @@ fn register_external_gguf(path: String) -> Result<DownloadResult, String> {
 
 async fn ensure_llama_server_binary(app: &AppHandle) -> Result<PathBuf, String> {
     let bin = llama_server_path(app)?;
-    if bin.exists() {
+    let dir = runtime_dir(app)?;
+    let required_runtime_files = [
+        "llama-server.exe",
+        "llama-server-impl.dll",
+        "llama-common.dll",
+        "llama.dll",
+        "ggml.dll",
+        "ggml-base.dll",
+    ];
+    if required_runtime_files.iter().all(|name| dir.join(name).exists()) {
         return Ok(bin);
     }
 
-    let dir = runtime_dir(app)?;
     let zip_path = dir.join("llama-server-runtime.zip");
     let client = reqwest::Client::builder()
         .user_agent("LetsDoIT-Classroom/0.1")
@@ -1042,17 +1055,27 @@ async fn ensure_llama_server_binary(app: &AppHandle) -> Result<PathBuf, String> 
     let file = fs::File::open(&zip_path).map_err(|e| format!("Cannot open runtime zip: {e}"))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Invalid runtime zip: {e}"))?;
     let mut found = false;
+    let mut extracted_dlls = 0usize;
     for i in 0..archive.len() {
         let mut entry = archive
             .by_index(i)
             .map_err(|e| format!("Zip entry error: {e}"))?;
         let name = entry.name().replace('\\', "/");
         let base = name.split('/').last().unwrap_or("");
-        if base.eq_ignore_ascii_case("llama-server.exe") {
-            let mut out = fs::File::create(&bin).map_err(|e| format!("Cannot write llama-server: {e}"))?;
+        let is_server = base.eq_ignore_ascii_case("llama-server.exe");
+        let is_runtime_dll = base.to_ascii_lowercase().ends_with(".dll");
+        if !base.is_empty() && (is_server || is_runtime_dll) {
+            // Flatten to known filenames. This avoids zip path traversal and
+            // keeps every DLL beside llama-server.exe where Windows loads it.
+            let output_path = dir.join(base);
+            let mut out = fs::File::create(&output_path)
+                .map_err(|e| format!("Cannot write runtime file {base}: {e}"))?;
             std::io::copy(&mut entry, &mut out).map_err(|e| format!("Extract error: {e}"))?;
-            found = true;
-            break;
+            if is_server {
+                found = true;
+            } else {
+                extracted_dlls += 1;
+            }
         }
     }
     let _ = fs::remove_file(&zip_path);
@@ -1060,6 +1083,14 @@ async fn ensure_llama_server_binary(app: &AppHandle) -> Result<PathBuf, String> 
         return Err(
             "Runtime package downloaded but llama-server.exe was not found inside the zip.".into(),
         );
+    }
+    if let Some(missing) = required_runtime_files
+        .iter()
+        .find(|name| !dir.join(name).exists())
+    {
+        return Err(format!(
+            "Offline runtime package is incomplete: required file {missing} was not found."
+        ));
     }
 
     let _ = app.emit(
@@ -1069,7 +1100,7 @@ async fn ensure_llama_server_binary(app: &AppHandle) -> Result<PathBuf, String> 
             downloaded_bytes: bytes.len() as u64,
             total_bytes: Some(bytes.len() as u64),
             status: "runtime-ready".into(),
-            detail: Some("Offline engine ready".into()),
+            detail: Some(format!("Offline engine ready ({extracted_dlls} runtime DLLs)")),
         },
     );
 
@@ -1128,6 +1159,7 @@ async fn wait_for_runtime(endpoint: &str, timeout_ms: u64) -> bool {
 
 #[tauri::command]
 async fn ensure_offline_runtime(app: AppHandle, model_path: String) -> Result<OfflineRuntimeStatus, String> {
+    let _start_guard = OFFLINE_START_LOCK.lock().await;
     let path = PathBuf::from(model_path.trim());
     if !path.exists() {
         return Ok(OfflineRuntimeStatus {
@@ -1171,7 +1203,7 @@ async fn ensure_offline_runtime(app: AppHandle, model_path: String) -> Result<Of
         .arg("--host")
         .arg("127.0.0.1")
         .arg("-c")
-        .arg("4096")
+        .arg("8192")
         .arg("-ngl")
         .arg("0")
         .stdout(Stdio::from(log_file))

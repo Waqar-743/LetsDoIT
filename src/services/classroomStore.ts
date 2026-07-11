@@ -35,17 +35,18 @@ import {
 } from './desktop';
 
 export const STORE_KEYS = {
-  courses: 'letsdoit_courses_v3',
-  materials: 'letsdoit_materials_v3',
-  quizzes: 'letsdoit_quizzes_v3',
-  attempts: 'letsdoit_attempts_v3',
-  practice: 'letsdoit_practice_v2',
-  logs: 'letsdoit_logs_v3',
-  student: 'letsdoit_student_v3',
-  teacher: 'letsdoit_teacher_v3',
-  role: 'letsdoit_role_v3',
-  /** Monotonic revision so students detect teacher writes */
-  revision: 'letsdoit_classroom_revision_v1',
+  // v4: cleared demo seed data; real classroom-only persistence
+  courses: 'letsdoit_courses_v4',
+  materials: 'letsdoit_materials_v4',
+  quizzes: 'letsdoit_quizzes_v4',
+  attempts: 'letsdoit_attempts_v4',
+  practice: 'letsdoit_practice_v4',
+  logs: 'letsdoit_logs_v4',
+  student: 'letsdoit_student_v4',
+  teacher: 'letsdoit_teacher_v4',
+  role: 'letsdoit_role_v4',
+  /** Monotonic revision so students/teachers detect shared writes */
+  revision: 'letsdoit_classroom_revision_v4',
 } as const;
 
 export type ClassroomSnapshot = {
@@ -278,31 +279,39 @@ export async function persistTeacher(teacher: TeacherProfile): Promise<void> {
 
 /**
  * Soft reload shared slices from disk/localStorage without full remount.
- * Used by student polling so teacher uploads appear without re-login.
+ * Used by polling so teacher uploads and student quiz attempts stay in sync.
  */
 export async function reloadSharedClassroom(): Promise<{
   courses: Course[] | null;
   materials: CourseMaterial[] | null;
   quizzes: Quiz[] | null;
+  attempts: QuizAttempt[] | null;
+  practiceSets: PracticeSet[] | null;
   logs: SystemLog[] | null;
   revision: number;
 }> {
   let courses = readLocal<Course[]>(STORE_KEYS.courses);
   let materials = readLocal<CourseMaterial[]>(STORE_KEYS.materials);
   let quizzes = readLocal<Quiz[]>(STORE_KEYS.quizzes);
+  let attempts = readLocal<QuizAttempt[]>(STORE_KEYS.attempts);
+  let practiceSets = readLocal<PracticeSet[]>(STORE_KEYS.practice);
   let logs = readLocal<SystemLog[]>(STORE_KEYS.logs);
 
   if (isDesktopRuntime()) {
     try {
-      const [dCourses, dMaterials, dQuizzes, dLogs] = await Promise.all([
+      const [dCourses, dMaterials, dQuizzes, dAttempts, dPractice, dLogs] = await Promise.all([
         loadCourses(),
         loadMaterials(),
         loadQuizzes(),
+        loadAttempts(),
+        loadPracticeSets(),
         loadSystemLogs(),
       ]);
       if (dCourses) courses = dCourses;
       if (dMaterials) materials = dMaterials;
       if (dQuizzes) quizzes = dQuizzes;
+      if (dAttempts) attempts = dAttempts;
+      if (dPractice) practiceSets = dPractice;
       if (dLogs) logs = dLogs;
     } catch {
       // keep local
@@ -313,6 +322,8 @@ export async function reloadSharedClassroom(): Promise<{
     courses,
     materials,
     quizzes,
+    attempts,
+    practiceSets,
     logs,
     revision: getRevision(),
   };

@@ -93,9 +93,10 @@ import {
   INITIAL_ATTEMPTS,
   INITIAL_COURSES,
   INITIAL_MATERIALS,
-  INITIAL_QUIZZES,
+  INITIAL_PRACTICE_SETS,
   INITIAL_STUDENT_PROFILE,
   INITIAL_SYSTEM_LOGS,
+  INITIAL_TEACHER_PROFILE,
 } from './mockData';
 
 type Screen = 'auth' | 'student' | 'teacher';
@@ -220,33 +221,29 @@ function scoreShortAnswer(answer: string, correct: string) {
   return correctTokens.some((word) => answerTokens.has(word)) || answer.length > 40;
 }
 
-const defaultTeacher: TeacherProfile = {
-  id: 't1',
-  name: 'Prof. Dr. Tariq Shah',
-  email: 'tariq.shah@nutech.edu.pk',
-  isApproved: true,
-  department: 'Computer Science',
-};
+const defaultTeacher: TeacherProfile = { ...INITIAL_TEACHER_PROFILE };
 
-const defaultMaterials: CourseMaterial[] = INITIAL_MATERIALS.map((m) => ({
-  ...m,
-  topic: m.title.split(':')[0],
-  lessonMap: createLessonMap(m),
-  chunks: chunkDocumentText(m.contentSummary || m.title),
-}));
+/** Normalize user-entered course join codes to 4 digits. */
+function normalizeCourseCode(raw: string): string {
+  return raw.replace(/\D/g, '').slice(0, 4);
+}
+
+function isValidCourseCode(code: string): boolean {
+  return /^\d{4}$/.test(code);
+}
 
 function App() {
-  const [role, setRole] = useStoredState<UserRole>('letsdoit_role_v3', null);
+  const [role, setRole] = useStoredState<UserRole>('letsdoit_role_v4', null);
   const [student, setStudent] = useState<StudentProfile>(INITIAL_STUDENT_PROFILE);
   const [teacher, setTeacher] = useState<TeacherProfile>(defaultTeacher);
   const [courses, setCourses] = useState<Course[]>(INITIAL_COURSES);
-  const [materials, setMaterials] = useState<CourseMaterial[]>(defaultMaterials);
+  const [materials, setMaterials] = useState<CourseMaterial[]>(INITIAL_MATERIALS);
   const [quizzes, setQuizzes] = useState<Quiz[]>([]);
-  const [attempts, setAttempts] = useState<QuizAttempt[]>([]);
-  const [practiceSets, setPracticeSets] = useState<PracticeSet[]>([]);
+  const [attempts, setAttempts] = useState<QuizAttempt[]>(INITIAL_ATTEMPTS);
+  const [practiceSets, setPracticeSets] = useState<PracticeSet[]>(INITIAL_PRACTICE_SETS);
   const [logs, setLogs] = useState<SystemLog[]>(INITIAL_SYSTEM_LOGS);
-  const [model, setModel] = useStoredState<LocalModelState>('letsdoit_model_v3', defaultModel);
-  const [aiSettings, setAiSettings] = useStoredState<AISettings>('letsdoit_ai_settings_v2', DEFAULT_AI_SETTINGS);
+  const [model, setModel] = useStoredState<LocalModelState>('letsdoit_model_v4', defaultModel);
+  const [aiSettings, setAiSettings] = useStoredState<AISettings>('letsdoit_ai_settings_v3', DEFAULT_AI_SETTINGS);
   const [desktopEnv, setDesktopEnv] = useState<DesktopEnvironment | null>(null);
   const [desktopModelReady, setDesktopModelReady] = useState(false);
   const [classroomReady, setClassroomReady] = useState(false);
@@ -266,18 +263,34 @@ function App() {
         const storedSettings = await loadAISettings();
         const snap = await loadClassroomSnapshot({
           courses: INITIAL_COURSES,
-          materials: defaultMaterials,
-          // No seeded dummy quizzes — student/teacher quizzes must come from real AI generation
+          materials: INITIAL_MATERIALS,
+          // Quizzes/attempts start empty — only real AI generation + student work
           quizzes: [],
-          attempts: [],
-          practiceSets: [],
+          attempts: INITIAL_ATTEMPTS,
+          practiceSets: INITIAL_PRACTICE_SETS,
           logs: INITIAL_SYSTEM_LOGS,
           student: INITIAL_STUDENT_PROFILE,
           teacher: defaultTeacher,
         });
         if (!mounted) return;
         setDesktopEnv(environment);
-        if (storedModel) setModel(normalizeModelState(storedModel));
+        if (storedModel) {
+          const restoredModel = normalizeModelState(storedModel);
+          setModel(restoredModel);
+          // Reconnect downloaded models automatically on desktop startup.
+          if (restoredModel.localPath && isDesktopRuntime()) {
+            void testOfflineHfModel(restoredModel.localPath).then((result) => {
+              if (!mounted) return;
+              setModel((prev) => ({
+                ...prev,
+                connected: result.ok,
+                downloadStatus: 'downloaded',
+                downloadProgress: 100,
+                lastChecked: nowStamp(),
+              }));
+            });
+          }
+        }
         if (storedSettings) {
           setAiSettings((prev) => ({ ...DEFAULT_AI_SETTINGS, ...prev, ...storedSettings }));
         }
@@ -370,6 +383,12 @@ function App() {
       if (shared.quizzes) {
         setQuizzes((prev) => (stableEqual(prev, shared.quizzes) ? prev : shared.quizzes!));
       }
+      if (shared.attempts) {
+        setAttempts((prev) => (stableEqual(prev, shared.attempts) ? prev : shared.attempts!));
+      }
+      if (shared.practiceSets) {
+        setPracticeSets((prev) => (stableEqual(prev, shared.practiceSets) ? prev : shared.practiceSets!));
+      }
       if (shared.logs) {
         setLogs((prev) => (stableEqual(prev, shared.logs) ? prev : shared.logs!));
       }
@@ -396,6 +415,8 @@ function App() {
                 `Course material updated: "${changed.title}". Open Materials for the latest summary/chunks.`,
               );
             }
+          } else if (role === 'TEACHER' && revisionAdvanced) {
+            setClassroomNotice('Classroom data refreshed (materials / enrollments / activity).');
           }
           lastMaterialCountRef.current = shared.materials!.length;
           return shared.materials!;
@@ -405,10 +426,11 @@ function App() {
 
     const onStorage = (event: StorageEvent) => {
       if (
-        event.key === 'letsdoit_materials_v3' ||
-        event.key === 'letsdoit_courses_v3' ||
-        event.key === 'letsdoit_quizzes_v3' ||
-        event.key === 'letsdoit_classroom_revision_v1'
+        event.key === 'letsdoit_materials_v4' ||
+        event.key === 'letsdoit_courses_v4' ||
+        event.key === 'letsdoit_quizzes_v4' ||
+        event.key === 'letsdoit_attempts_v4' ||
+        event.key === 'letsdoit_classroom_revision_v4'
       ) {
         void pull();
       }
@@ -530,9 +552,20 @@ function Auth({
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
     setError('');
-    if (mode === 'teacher' && secret !== 'TEACH-2026') {
-      setError('Teacher access is restricted. Use the prototype admin secret: TEACH-2026.');
-      return;
+    if (mode === 'student') {
+      if (!student.name.trim() || !student.email.trim()) {
+        setError('Enter your name and email to open the student workspace.');
+        return;
+      }
+    } else {
+      if (!teacher.name.trim() || !teacher.email.trim()) {
+        setError('Enter faculty name and email to open the teacher workspace.');
+        return;
+      }
+      if (secret !== 'TEACH-2026') {
+        setError('Teacher access is restricted. Use the admin secret: TEACH-2026.');
+        return;
+      }
     }
     onLogin(mode === 'teacher' ? 'TEACHER' : 'STUDENT');
   };
@@ -549,7 +582,7 @@ function Auth({
         </div>
         <div className="max-w-3xl py-16">
           <p className="mb-4 inline-flex items-center gap-2 border border-zinc-700 px-3 py-1 text-xs text-zinc-300">
-            <Cpu className="h-4 w-4" /> Offline-first prototype
+            <Cpu className="h-4 w-4" /> Offline-first hybrid classroom
           </p>
           <h1 className="text-4xl md:text-6xl font-black tracking-tight leading-[0.95]">
             Teach, study, quiz, and diagnose weak areas without depending on the internet.
@@ -664,20 +697,42 @@ function StudentWorkspace(props: {
 
   const joinCourse = (event: React.FormEvent) => {
     event.preventDefault();
-    const course = props.courses.find((item) => item.code === joinCode.trim());
+    const code = normalizeCourseCode(joinCode);
+    if (!isValidCourseCode(code)) {
+      setJoinMessage('Enter a valid 4-digit course code (e.g. 4821).');
+      return;
+    }
+    const course = props.courses.find((item) => item.code === code && item.status === 'active');
     if (!course) {
-      setJoinMessage('No course found for this four digit code.');
+      setJoinMessage(`No active course found for code ${code}. Ask your teacher for the join code.`);
       return;
     }
     if (props.profile.joinedCourseIds.includes(course.id)) {
       setJoinMessage('You are already enrolled in this course.');
       return;
     }
-    props.setStudent((prev) => ({ ...prev, joinedCourseIds: [...prev.joinedCourseIds, course.id] }));
-    props.setCourses((prev) => prev.map((item) => item.id === course.id ? { ...item, enrolledCount: item.enrolledCount + 1, enrolledStudentIds: [...item.enrolledStudentIds, props.profile.id] } : item));
-    props.addLog('Course joined', `${props.profile.name} joined ${course.title}.`, 'STUDENT');
+    const studentId = props.profile.id || `s_${Date.now()}`;
+    props.setStudent((prev) => ({
+      ...prev,
+      id: prev.id || studentId,
+      joinedCourseIds: [...prev.joinedCourseIds, course.id],
+    }));
+    props.setCourses((prev) =>
+      prev.map((item) =>
+        item.id === course.id
+          ? {
+              ...item,
+              enrolledCount: item.enrolledCount + 1,
+              enrolledStudentIds: item.enrolledStudentIds.includes(studentId)
+                ? item.enrolledStudentIds
+                : [...item.enrolledStudentIds, studentId],
+            }
+          : item,
+      ),
+    );
+    props.addLog('Course joined', `${props.profile.name || 'Student'} joined ${course.title} (${code}).`, 'STUDENT');
     setJoinCode('');
-    setJoinMessage(`Joined ${course.title}.`);
+    setJoinMessage(`Joined ${course.title}. Materials for this course will appear under Materials.`);
   };
 
   const sendChat = async (event?: React.FormEvent, promptOverride?: string) => {
@@ -1037,7 +1092,13 @@ function StudentWorkspace(props: {
             </div>
             <p className="label">Join a course</p>
             <form onSubmit={joinCourse} className="mt-4 space-y-3">
-              <Field label="Four digit course code" value={joinCode} onChange={setJoinCode} placeholder="1024" maxLength={4} />
+              <Field
+                label="Four digit course code"
+                value={joinCode}
+                onChange={(v) => setJoinCode(normalizeCourseCode(v))}
+                placeholder="e.g. 4821"
+                maxLength={4}
+              />
               <button className="btn-primary w-full" type="submit"><Plus className="h-4 w-4" /> Join course</button>
               {joinMessage && <p className="text-xs text-zinc-600">{joinMessage}</p>}
             </form>
@@ -1317,27 +1378,59 @@ function TeacherWorkspace(props: {
   const [thinking, setThinking] = useState(false);
   const [uploadingMaterial, setUploadingMaterial] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
+  const [courseStatus, setCourseStatus] = useState<string | null>(null);
   const [summarizingId, setSummarizingId] = useState<string | null>(null);
   const [generatingQuiz, setGeneratingQuiz] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
-  const teacherCourses = props.courses.filter((course) => course.teacherId === props.profile.id || props.profile.id === 't1');
-  const selectedCourse = props.courses.find((course) => course.id === selectedCourseId) || teacherCourses[0];
+  const teacherCourses = props.courses.filter(
+    (course) => course.teacherId === props.profile.id || (!course.teacherId && props.profile.id === 't1'),
+  );
+  const selectedCourse = teacherCourses.find((course) => course.id === selectedCourseId) || teacherCourses[0];
   const selectedMaterials = selectedCourse ? props.materials.filter((material) => material.courseId === selectedCourse.id) : [];
   const selectedQuizzes = selectedCourse ? props.quizzes.filter((quiz) => quiz.courseId === selectedCourse.id) : [];
-  const selectedAttempts = selectedCourse ? props.attempts.filter((attempt) => attempt.courseId === selectedCourse.id) : props.attempts;
+  const selectedAttempts = selectedCourse
+    ? props.attempts.filter((attempt) => attempt.courseId === selectedCourse.id)
+    : props.attempts.filter((attempt) => teacherCourses.some((c) => c.id === attempt.courseId));
   const weakTopics = selectedAttempts.flatMap((attempt) => attempt.diagnosis.weakTopics);
-  const riskCount = selectedAttempts.filter((attempt) => (attempt.score / attempt.totalQuestions) < 0.5).length;
+  const riskCount = selectedAttempts.filter(
+    (attempt) => attempt.totalQuestions > 0 && attempt.score / attempt.totalQuestions < 0.5,
+  ).length;
+  const enrolledIds = selectedCourse?.enrolledStudentIds || [];
+  const teacherMaterialCount = props.materials.filter((m) =>
+    teacherCourses.some((c) => c.id === m.courseId),
+  ).length;
 
   const createCourse = (event: React.FormEvent) => {
     event.preventDefault();
-    const code = courseDraft.code || Math.floor(1000 + Math.random() * 9000).toString();
+    const title = courseDraft.title.trim();
+    if (!title) {
+      setCourseStatus('Course title is required.');
+      return;
+    }
+    let code = normalizeCourseCode(courseDraft.code);
+    if (code && !isValidCourseCode(code)) {
+      setCourseStatus('Course code must be exactly 4 digits.');
+      return;
+    }
+    if (!code) {
+      // Generate a unique 4-digit code
+      let attemptsGen = 0;
+      do {
+        code = Math.floor(1000 + Math.random() * 9000).toString();
+        attemptsGen += 1;
+      } while (props.courses.some((c) => c.code === code) && attemptsGen < 40);
+    }
+    if (props.courses.some((c) => c.code === code)) {
+      setCourseStatus(`Code ${code} is already in use. Pick another 4-digit code.`);
+      return;
+    }
     const course: Course = {
       id: uid('course'),
       code,
-      title: courseDraft.title,
-      description: courseDraft.description || 'Teacher-created local course.',
-      subject: courseDraft.subject || props.profile.department,
+      title,
+      description: courseDraft.description.trim() || 'Teacher-created local course.',
+      subject: courseDraft.subject.trim() || props.profile.department || 'General',
       semester: courseDraft.semester,
       status: 'active',
       teacherName: props.profile.name,
@@ -1348,6 +1441,7 @@ function TeacherWorkspace(props: {
     props.setCourses((prev) => [course, ...prev]);
     setSelectedCourseId(course.id);
     setCourseDraft({ title: '', description: '', subject: '', semester: '6th Semester', code: '' });
+    setCourseStatus(`Course created. Share join code ${code} with students.`);
     props.addLog('Course created', `${props.profile.name} created ${course.title} with code ${code}.`, 'TEACHER');
   };
 
@@ -1659,15 +1753,50 @@ function TeacherWorkspace(props: {
       {tab === 'overview' && (
         <div className="grid gap-5 lg:grid-cols-[1fr_1fr_0.8fr]">
           <MetricPanel icon={<BookOpen />} label="Courses created" value={teacherCourses.length} />
-          <MetricPanel icon={<Upload />} label="Uploaded materials" value={props.materials.length} />
+          <MetricPanel icon={<Upload />} label="Uploaded materials" value={teacherMaterialCount} />
           <MetricPanel icon={<Users />} label="Students at risk" value={riskCount} />
           <Panel className="lg:col-span-3 p-6">
             <p className="label">Course analytics snapshot</p>
             <div className="mt-5 grid gap-3 md:grid-cols-4">
-              <Metric label="Quiz attempts" value={props.attempts.length} />
-              <Metric label="Published quizzes" value={props.quizzes.length} />
+              <Metric label="Quiz attempts" value={selectedAttempts.length} />
+              <Metric label="Published quizzes" value={selectedQuizzes.filter((q) => q.isPublished).length} />
               <Metric label="Class weak topics" value={new Set(weakTopics).size} />
-              <Metric label="Model connected" value={props.model.connected ? 'Yes' : 'No'} />
+              <Metric label="Enrolled students" value={enrolledIds.length} />
+            </div>
+            {selectedCourse && (
+              <p className="mt-4 text-xs text-zinc-500">
+                Selected course: <strong>{selectedCourse.title}</strong> · join code{' '}
+                <span className="font-mono font-bold">{selectedCourse.code}</span>
+              </p>
+            )}
+          </Panel>
+          <Panel className="lg:col-span-3 p-6">
+            <p className="label">Recent student activity</p>
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              {selectedAttempts.slice(0, 6).map((attempt) => (
+                <div key={attempt.id} className="border border-zinc-200 bg-white p-4 text-sm">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="font-black">{attempt.quizTitle}</h3>
+                      <p className="mt-1 text-xs text-zinc-500">
+                        {attempt.courseTitle} · {attempt.attemptDate}
+                      </p>
+                    </div>
+                    <span className="font-mono text-sm font-black">
+                      {attempt.score}/{attempt.totalQuestions}
+                    </span>
+                  </div>
+                  <p className="mt-2 text-xs text-zinc-600">
+                    {attempt.diagnosis.preparationLevel}
+                    {attempt.diagnosis.weakTopics.length
+                      ? ` · Weak: ${attempt.diagnosis.weakTopics.join(', ')}`
+                      : ' · No weak topics'}
+                  </p>
+                </div>
+              ))}
+              {!selectedAttempts.length && (
+                <Empty text="No student quiz attempts yet. When students practice, scores appear here." />
+              )}
             </div>
           </Panel>
         </div>
@@ -1681,17 +1810,40 @@ function TeacherWorkspace(props: {
               <Field label="Course title" value={courseDraft.title} onChange={(value) => setCourseDraft((prev) => ({ ...prev, title: value }))} />
               <Field label="Subject" value={courseDraft.subject} onChange={(value) => setCourseDraft((prev) => ({ ...prev, subject: value }))} />
               <Field label="Semester" value={courseDraft.semester} onChange={(value) => setCourseDraft((prev) => ({ ...prev, semester: value }))} />
-              <Field label="Four digit code" value={courseDraft.code} onChange={(value) => setCourseDraft((prev) => ({ ...prev, code: value }))} placeholder="Auto if blank" maxLength={4} />
+              <Field
+                label="Four digit code"
+                value={courseDraft.code}
+                onChange={(value) => setCourseDraft((prev) => ({ ...prev, code: normalizeCourseCode(value) }))}
+                placeholder="Auto if blank"
+                maxLength={4}
+              />
               <TextArea label="Description" value={courseDraft.description} onChange={(value) => setCourseDraft((prev) => ({ ...prev, description: value }))} />
               <button className="btn-primary" type="submit"><Plus className="h-4 w-4" /> Create course</button>
+              {courseStatus && (
+                <pre className="whitespace-pre-wrap border border-zinc-200 bg-stone-50 px-3 py-2 text-[11px] text-zinc-700">
+                  {courseStatus}
+                </pre>
+              )}
             </form>
           </Panel>
           <Panel className="p-5">
             <p className="label">Course registry</p>
             <div className="mt-4 grid gap-3">
               {teacherCourses.map((course) => (
-                <CourseRow key={course.id} course={course} active={course.id === selectedCourseId} onClick={() => setSelectedCourseId(course.id)} actionLabel="Delete" onAction={() => props.setCourses((prev) => prev.filter((item) => item.id !== course.id))} />
+                <CourseRow
+                  key={course.id}
+                  course={course}
+                  active={course.id === selectedCourseId}
+                  onClick={() => setSelectedCourseId(course.id)}
+                  actionLabel="Delete"
+                  onAction={() => {
+                    props.setCourses((prev) => prev.filter((item) => item.id !== course.id));
+                    props.setMaterials((prev) => prev.filter((m) => m.courseId !== course.id));
+                    props.setQuizzes((prev) => prev.filter((q) => q.courseId !== course.id));
+                  }}
+                />
               ))}
+              {!teacherCourses.length && <Empty text="No courses yet. Create one and share the 4-digit code." />}
             </div>
           </Panel>
         </div>
@@ -1879,7 +2031,45 @@ function TeacherWorkspace(props: {
       {tab === 'analytics' && (
         <div className="grid gap-5 lg:grid-cols-[1fr_1fr]">
           <Panel className="p-5">
-            <p className="label">Weak topic distribution</p>
+            <div className="flex flex-wrap items-end gap-3">
+              <CourseSelect courses={teacherCourses} value={selectedCourse?.id || ''} onChange={setSelectedCourseId} />
+            </div>
+            <p className="label mt-4">Enrollment</p>
+            <div className="mt-3 space-y-2">
+              {enrolledIds.length === 0 && (
+                <Empty text="No students enrolled yet. Share the 4-digit course code." />
+              )}
+              {enrolledIds.map((studentId) => {
+                const studentAttempts = selectedAttempts.filter((a) => a.studentId === studentId);
+                const latest = studentAttempts[0];
+                const avg =
+                  studentAttempts.length > 0
+                    ? Math.round(
+                        (studentAttempts.reduce(
+                          (sum, a) => sum + (a.totalQuestions ? a.score / a.totalQuestions : 0),
+                          0,
+                        ) /
+                          studentAttempts.length) *
+                          100,
+                      )
+                    : null;
+                return (
+                  <div key={studentId} className="border border-zinc-200 bg-white p-3 text-xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <strong className="font-mono">{studentId}</strong>
+                      <span className="text-zinc-500">{studentAttempts.length} attempt(s)</span>
+                    </div>
+                    <p className="mt-1 text-zinc-600">
+                      {latest
+                        ? `Latest: ${latest.quizTitle} · ${latest.score}/${latest.totalQuestions} · ${latest.diagnosis.preparationLevel}`
+                        : 'No quiz attempts yet'}
+                      {avg !== null ? ` · Avg ${avg}%` : ''}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="label mt-5">Weak topic distribution</p>
             <div className="mt-4 space-y-3">
               {Array.from(new Set(weakTopics)).map((topic) => {
                 const count = weakTopics.filter((item) => item === topic).length;
@@ -1889,8 +2079,31 @@ function TeacherWorkspace(props: {
             </div>
           </Panel>
           <Panel className="p-5">
-            <p className="label">Activity log</p>
-            <div className="mt-4 max-h-[420px] overflow-auto space-y-2">
+            <p className="label">Quiz attempts (selected course)</p>
+            <div className="mt-4 max-h-[280px] overflow-auto space-y-2">
+              {selectedAttempts.map((attempt) => (
+                <div key={attempt.id} className="border border-zinc-200 bg-white p-3 text-xs">
+                  <div className="flex justify-between gap-2">
+                    <strong>{attempt.quizTitle}</strong>
+                    <span className="font-mono font-black">
+                      {attempt.score}/{attempt.totalQuestions}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-zinc-600">
+                    Student {attempt.studentId} · {attempt.attemptDate}
+                    {attempt.isTestMode ? ' · Official test' : ' · Practice'}
+                  </p>
+                  {attempt.diagnosis.weakTopics.length > 0 && (
+                    <p className="mt-1 text-amber-800">Weak: {attempt.diagnosis.weakTopics.join(', ')}</p>
+                  )}
+                </div>
+              ))}
+              {!selectedAttempts.length && (
+                <Empty text="No attempts for this course yet." />
+              )}
+            </div>
+            <p className="label mt-5">Activity log</p>
+            <div className="mt-4 max-h-[220px] overflow-auto space-y-2">
               {props.logs.map((log) => (
                 <div key={log.id} className="border border-zinc-200 bg-white p-3 text-xs">
                   <strong>{log.event}</strong>
@@ -2083,7 +2296,7 @@ function ModelPanel({
     setTestingOffline(false);
   };
 
-  const handleSelectInstalled = (item: LocalGgufModel) => {
+  const handleSelectInstalled = async (item: LocalGgufModel) => {
     setModel((prev) => ({
       ...prev,
       provider: 'huggingface',
@@ -2095,7 +2308,18 @@ function ModelPanel({
       endpoint: 'http://127.0.0.1:3928',
       lastChecked: nowStamp(),
     }));
-    setOfflineStatus(`Selected local model:\n${item.name}\n${item.path}\n\nClick Test Offline Model to connect.`);
+    setOfflineStatus(`Selected local model:\n${item.name}\n${item.path}\n\nStarting and testing it now...`);
+    setTestingOffline(true);
+    const result = await testOfflineHfModel(item.path);
+    setOfflineStatus(result.message);
+    setModel((prev) => ({
+      ...prev,
+      modelName: item.name,
+      localPath: item.path,
+      connected: result.ok,
+      lastChecked: nowStamp(),
+    }));
+    setTestingOffline(false);
   };
 
   const runHfDownload = async (urlOrRepo: string, filename?: string, label?: string) => {
@@ -2153,8 +2377,23 @@ function ModelPanel({
         lastChecked: nowStamp(),
       }));
       setDownloadDetail(result.message);
-      setOfflineStatus(`${result.message}\n\nClick Test Offline Model to load it fully offline.`);
+      setOfflineStatus(`${result.message}\n\nInstalling the local engine and connecting automatically...`);
       await refreshInstalled();
+      const connection = await testOfflineHfModel(result.path);
+      setModel((prev) => ({
+        ...prev,
+        modelName: result.name || filename || prev.modelName,
+        localPath: result.path || prev.localPath,
+        connected: connection.ok,
+        downloadStatus: 'downloaded',
+        downloadProgress: 100,
+        lastChecked: nowStamp(),
+      }));
+      setOfflineStatus(
+        connection.ok
+          ? `${result.message}\n\nAuto-connected successfully. Offline chat is ready.`
+          : `${result.message}\n\nThe file is installed, but automatic connection failed:\n${connection.message}`,
+      );
     } else {
       setModel((prev) => ({
         ...prev,
@@ -2236,10 +2475,10 @@ function ModelPanel({
                 />
               </div>
               <Field
-                label="Tertiary free model (used on 429 / provider error)"
+                label="General free router (used on 429 / provider error)"
                 value={aiSettings.openRouterTertiaryModelId || DEFAULT_AI_SETTINGS.openRouterTertiaryModelId}
                 onChange={(val) => setAiSettings((prev) => ({ ...prev, openRouterTertiaryModelId: val }))}
-                placeholder="google/gemma-4-31b-it:free"
+                placeholder="openrouter/free"
               />
               <Field
                 label="Base URL"
@@ -2314,7 +2553,7 @@ function ModelPanel({
               <div className="border border-emerald-200 bg-emerald-50 px-3 py-3 text-[11px] leading-5 text-emerald-950">
                 <p className="font-bold">No Ollama install required</p>
                 <p className="mt-1">
-                  Paste a Hugging Face GGUF model link → download it to your computer → Test Offline → chat fully offline.
+                  Paste a Hugging Face GGUF model link → download it to your computer → LetsDoIT connects it automatically → chat fully offline.
                   LetsDoIT stores the file under your app data folder and starts a local engine automatically.
                 </p>
                 <p className="mt-2">
@@ -2392,6 +2631,7 @@ function ModelPanel({
                       const maybePath = (file as File & { path?: string }).path;
                       if (maybePath) {
                         setManualPathDraft(maybePath);
+                        setTestingOffline(true);
                         const result = await importLocalGguf(maybePath);
                         setOfflineStatus(result.message);
                         if (result.ok && result.path) {
@@ -2403,9 +2643,22 @@ function ModelPanel({
                             downloadStatus: 'downloaded',
                             downloadProgress: 100,
                             connected: false,
+                            endpoint: 'http://127.0.0.1:3928',
                           }));
                           await refreshInstalled();
+                          const connection = await testOfflineHfModel(result.path);
+                          setModel((prev) => ({
+                            ...prev,
+                            connected: connection.ok,
+                            lastChecked: nowStamp(),
+                          }));
+                          setOfflineStatus(
+                            connection.ok
+                              ? `${result.message}\n\nAuto-connected. Offline chat is ready.`
+                              : `${result.message}\n\nImport OK, connection failed:\n${connection.message}`,
+                          );
                         }
+                        setTestingOffline(false);
                       } else {
                         setOfflineStatus(
                           `Selected file: ${file.name}\n\n` +
@@ -2428,8 +2681,9 @@ function ModelPanel({
                   <button
                     className="btn-primary text-xs"
                     type="button"
-                    disabled={!isDesktopRuntime() || !manualPathDraft.trim()}
+                    disabled={!isDesktopRuntime() || !manualPathDraft.trim() || testingOffline}
                     onClick={async () => {
+                      setTestingOffline(true);
                       const result = await importLocalGguf(manualPathDraft.trim());
                       setOfflineStatus(result.message);
                       if (result.ok && result.path) {
@@ -2444,7 +2698,22 @@ function ModelPanel({
                           endpoint: 'http://127.0.0.1:3928',
                         }));
                         await refreshInstalled();
+                        setOfflineStatus(`${result.message}\n\nConnecting offline runtime...`);
+                        const connection = await testOfflineHfModel(result.path);
+                        setModel((prev) => ({
+                          ...prev,
+                          modelName: result.name || prev.modelName,
+                          localPath: result.path || prev.localPath,
+                          connected: connection.ok,
+                          lastChecked: nowStamp(),
+                        }));
+                        setOfflineStatus(
+                          connection.ok
+                            ? `${result.message}\n\nAuto-connected. Offline chat is ready.`
+                            : `${result.message}\n\nImport OK, but connection failed:\n${connection.message}`,
+                        );
                       }
+                      setTestingOffline(false);
                     }}
                   >
                     Import into app folder
@@ -2452,8 +2721,9 @@ function ModelPanel({
                   <button
                     className="btn-ghost text-xs"
                     type="button"
-                    disabled={!isDesktopRuntime() || !manualPathDraft.trim()}
+                    disabled={!isDesktopRuntime() || !manualPathDraft.trim() || testingOffline}
                     onClick={async () => {
+                      setTestingOffline(true);
                       const result = await registerExternalGguf(manualPathDraft.trim());
                       setOfflineStatus(result.message);
                       if (result.ok && result.path) {
@@ -2467,7 +2737,22 @@ function ModelPanel({
                           connected: false,
                           endpoint: 'http://127.0.0.1:3928',
                         }));
+                        setOfflineStatus(`${result.message}\n\nConnecting offline runtime...`);
+                        const connection = await testOfflineHfModel(result.path);
+                        setModel((prev) => ({
+                          ...prev,
+                          modelName: result.name || prev.modelName,
+                          localPath: result.path || prev.localPath,
+                          connected: connection.ok,
+                          lastChecked: nowStamp(),
+                        }));
+                        setOfflineStatus(
+                          connection.ok
+                            ? `${result.message}\n\nAuto-connected. Offline chat is ready.`
+                            : `${result.message}\n\nPath registered, but connection failed:\n${connection.message}`,
+                        );
                       }
+                      setTestingOffline(false);
                     }}
                   >
                     Register path (no copy)
@@ -2524,7 +2809,7 @@ function ModelPanel({
                               className="btn-ghost text-xs"
                               onClick={() => {
                                 const found = localModels.find((m) => m.name === item.filename);
-                                if (found) handleSelectInstalled(found);
+                                if (found) void handleSelectInstalled(found);
                                 else {
                                   setHfUrlDraft(item.hfUrl);
                                   void runHfDownload(item.repo, item.filename, item.id);
@@ -2563,7 +2848,7 @@ function ModelPanel({
                         className={`flex items-center justify-between border px-3 py-2 text-left text-[11px] ${
                           model.localPath === item.path ? 'border-emerald-500 bg-emerald-50' : 'border-zinc-200 hover:bg-zinc-50'
                         }`}
-                        onClick={() => handleSelectInstalled(item)}
+                        onClick={() => void handleSelectInstalled(item)}
                       >
                         <span className="font-mono font-bold">{item.name}</span>
                         <span className="text-zinc-500">{item.sizeLabel}</span>

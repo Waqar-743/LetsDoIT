@@ -22,8 +22,8 @@ Install the latest desktop build from **GitHub Releases** (no Node/Rust required
 
 | Package | File | Use when |
 |---------|------|----------|
-| **NSIS setup** (recommended) | `LetsDoIT_0.1.0_x64-setup.exe` | Standard Windows install wizard |
-| **MSI** | `LetsDoIT_0.1.0_x64_en-US.msi` | Managed / enterprise install |
+| **NSIS setup** (recommended) | `LetsDoIT_0.1.3_x64-setup.exe` | Standard Windows install wizard |
+| **MSI** | `LetsDoIT_0.1.3_x64_en-US.msi` | Managed / enterprise install |
 
 → **[Latest release & installers](https://github.com/Waqar-743/LetsDoIT/releases/latest)**
 
@@ -147,7 +147,7 @@ Under the hood, a single **Auto Gemma Router** chooses the right path:
 ### End users (Windows)
 
 1. Download the installer from [Releases](https://github.com/Waqar-743/LetsDoIT/releases/latest).
-2. Run `LetsDoIT_0.1.0_x64-setup.exe` (or the MSI).
+2. Run `LetsDoIT_0.1.3_x64-setup.exe` (or the MSI).
 3. Open the app → **Model** tab → add OpenRouter key and/or offline GGUF.
 4. Teacher: create course → upload PDF. Student: join with code → Materials.
 
@@ -194,8 +194,8 @@ Artifacts:
 
 ```text
 src-tauri/target/release/letsdoit.exe
-src-tauri/target/release/bundle/nsis/LetsDoIT_0.1.0_x64-setup.exe
-src-tauri/target/release/bundle/msi/LetsDoIT_0.1.0_x64_en-US.msi
+src-tauri/target/release/bundle/nsis/LetsDoIT_0.1.3_x64-setup.exe
+src-tauri/target/release/bundle/msi/LetsDoIT_0.1.3_x64_en-US.msi
 ```
 
 ---
@@ -209,7 +209,7 @@ src-tauri/target/release/bundle/msi/LetsDoIT_0.1.0_x64_en-US.msi
 3. Base URL: `https://openrouter.ai/api/v1`
 4. Click **Test Online Model**.
 
-On **HTTP 429** / “Provider returned error”, the app shows the **full raw error**, retries with backoff, then fails over across free Gemma model IDs.
+On **HTTP 429** / “Provider returned error”, the app shows the **full raw error**, retries with backoff, then fails over across free Gemma model IDs and OpenRouter's `openrouter/free` availability router.
 
 ### 2. Free alternate online — Google AI Studio
 
@@ -227,7 +227,7 @@ ONLINE / HYBRID will use this path automatically when OpenRouter free capacity i
 3. **Download from Hugging Face**, or if download fails:
    - Download the `.gguf` in a browser
    - **Open models folder** / paste absolute path → **Import into app folder** or **Register path**
-4. Click **Test Offline Model**.
+4. LetsDoIT downloads the complete local inference runtime, connects the model, and runs a generation test automatically. It also reconnects the downloaded model when the desktop app restarts. **Test Offline Model** remains available as a manual diagnostic.
 
 ### 4. Hybrid
 

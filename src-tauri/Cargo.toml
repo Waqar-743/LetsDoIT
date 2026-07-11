@@ -1,6 +1,6 @@
 [package]
 name = "letsdoit"
-version = "0.1.0"
+version = "0.1.3"
 description = "Offline-first AI education desktop app"
 authors = ["Waqar Ahmed"]
 license = ""

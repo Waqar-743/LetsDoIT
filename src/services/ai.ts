@@ -332,6 +332,9 @@ export interface AISettings {
 export const FREE_OPENROUTER_GEMMA_MODELS = [
   'google/gemma-4-26b-a4b-it:free',
   'google/gemma-4-31b-it:free',
+  // OpenRouter-maintained router: selects an available free model when named
+  // providers are temporarily rate-limited or unavailable.
+  'openrouter/free',
 ] as const;
 
 export const DEFAULT_AI_SETTINGS: AISettings = {
@@ -339,7 +342,7 @@ export const DEFAULT_AI_SETTINGS: AISettings = {
   openRouterModelId: 'google/gemma-4-26b-a4b-it:free',
   openRouterBackupModelId: 'google/gemma-4-31b-it:free',
   // Second free Gemma (or swap to another free OpenRouter model if Gemma is exhausted)
-  openRouterTertiaryModelId: 'google/gemma-4-31b-it:free',
+  openRouterTertiaryModelId: 'openrouter/free',
   openRouterBaseUrl: 'https://openrouter.ai/api/v1',
   googleAiApiKey: '',
   googleAiModelId: 'gemma-3-27b-it',
@@ -503,13 +506,13 @@ export class LocalGemmaProvider {
     style: LanguageStyle,
     systemPrompt?: string,
   ): Promise<AIProviderResult> {
-    if (!model.connected || !model.localPath) {
+    if (!model.localPath) {
       throw new Error(
         'Local Hugging Face model is not connected.\n\n' +
           '1. Open Model settings\n' +
           '2. Paste a Hugging Face GGUF model link (or pick a preset)\n' +
           '3. Download the model to this computer\n' +
-          '4. Click Test Offline Model',
+          '4. LetsDoIT will install the local runtime and connect it automatically',
       );
     }
 
@@ -527,11 +530,21 @@ export class LocalGemmaProvider {
           { role: 'system', content: system },
           { role: 'user', content: prompt },
         ],
-        maxTokens: 2048,
+        // Keep room in the local context for document passages and the answer.
+        // Large reservations can make llama.cpp reject valid RAG prompts.
+        maxTokens: 1536,
         temperature: 0.55,
       });
+      const text = (result.text || '').trim();
+      if (!text) {
+        throw new Error(
+          'Local model returned an empty response.\n\n' +
+            'Try a shorter prompt, free more RAM, or switch ONLINE/HYBRID. ' +
+            'If this keeps happening, re-test the offline model under Model settings.',
+        );
+      }
       return {
-        text: result.text || 'Local model returned an empty response.',
+        text,
         modeUsed: 'OFFLINE',
         providerName: result.providerName || `Local HF (${model.modelName})`,
         fromCache: false,
@@ -629,7 +642,7 @@ export class OpenRouterGemmaProvider {
     prompt: string,
     attempt = 1,
   ): Promise<AIProviderResult> {
-    const maxAttempts = 2;
+    const maxAttempts = 3;
     let response: Response;
     try {
       response = await robustFetch(`${baseUrl}/chat/completions`, {
@@ -653,6 +666,11 @@ export class OpenRouterGemmaProvider {
       });
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
+      // Network blips: one soft retry before failing the model
+      if (attempt < 2 && /fetch|network|timeout|ECONN|Failed to fetch/i.test(msg)) {
+        await sleep(1500 * attempt);
+        return this.callModel(baseUrl, apiKey, modelId, system, prompt, attempt + 1);
+      }
       throw new Error(
         `Cannot reach OpenRouter at ${baseUrl}/chat/completions.\n\n` +
           `Model: ${modelId}\n` +
@@ -663,8 +681,8 @@ export class OpenRouterGemmaProvider {
 
     if (!response.ok) {
       const body = await readErrorBody(response);
-      // One automatic retry on 429 for the same model (short wait)
-      if (response.status === 429 && attempt < maxAttempts) {
+      // Automatic retry on rate-limit / transient provider errors for the same model
+      if ((response.status === 429 || response.status === 502 || response.status === 503) && attempt < maxAttempts) {
         await sleep(2000 * attempt);
         return this.callModel(baseUrl, apiKey, modelId, system, prompt, attempt + 1);
       }
@@ -672,7 +690,17 @@ export class OpenRouterGemmaProvider {
     }
 
     const data = await response.json();
-    const text = data.choices?.[0]?.message?.content;
+    const content = data.choices?.[0]?.message?.content;
+    const text = typeof content === 'string'
+      ? content.trim()
+      : Array.isArray(content)
+        ? content
+            .map((part: { type?: string; text?: string } | string) =>
+              typeof part === 'string' ? part : part?.type === 'text' ? part.text || '' : '',
+            )
+            .join('\n')
+            .trim()
+        : '';
     if (!text) {
       // Some providers put the error inside a 200-ish payload or empty choices
       const raw = JSON.stringify(data, null, 2).slice(0, 2500);
@@ -743,7 +771,9 @@ export class GoogleAiGemmaProvider {
     modelId: string,
     system: string,
     prompt: string,
+    attempt = 1,
   ): Promise<AIProviderResult> {
+    const maxAttempts = 2;
     const url =
       `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:generateContent` +
       `?key=${encodeURIComponent(apiKey)}`;
@@ -770,10 +800,17 @@ export class GoogleAiGemmaProvider {
 
     if (!response.ok) {
       const body = await readErrorBody(response);
+      if ((response.status === 429 || response.status === 503) && attempt < maxAttempts) {
+        await sleep(2000 * attempt);
+        return this.callModel(apiKey, modelId, system, prompt, attempt + 1);
+      }
       throw new Error(formatHttpError(response.status, body, `Google AI (${modelId})`));
     }
 
     const data = await response.json();
+    // Blocked / safety filters often return candidates with finishReason but no text
+    const finishReason = data?.candidates?.[0]?.finishReason;
+    const blockReason = data?.promptFeedback?.blockReason;
     const text =
       data?.candidates?.[0]?.content?.parts
         ?.map((p: { text?: string }) => p.text || '')
@@ -781,7 +818,10 @@ export class GoogleAiGemmaProvider {
         .trim() || '';
     if (!text) {
       throw new Error(
-        `Google AI (${modelId}) returned empty content.\n\nFull payload:\n${JSON.stringify(data, null, 2).slice(0, 2500)}`,
+        `Google AI (${modelId}) returned empty content` +
+          (finishReason ? ` (finishReason: ${finishReason})` : '') +
+          (blockReason ? ` (blockReason: ${blockReason})` : '') +
+          `.\n\nFull payload:\n${JSON.stringify(data, null, 2).slice(0, 2500)}`,
       );
     }
     return {
@@ -1377,9 +1417,13 @@ export async function generateQuizWithAI(
   // Diverse sampling across the whole document (RAG-style coverage), not only the first pages
   const chunks = selectQuizChunks(request.material, 16);
   const allChunks = materialChunks(request.material);
+  // Smaller local context leaves output headroom on compact offline models.
   const context =
-    buildChunkContext(chunks, 12_000, 16) ||
-    compact(request.material.contentText || request.material.contentSummary || '', 12_000);
+    buildChunkContext(chunks, mode === 'OFFLINE' ? 8_000 : 12_000, 16) ||
+    compact(
+      request.material.contentText || request.material.contentSummary || '',
+      mode === 'OFFLINE' ? 8_000 : 12_000,
+    );
 
   if (!context.trim() || (!allChunks.length && !(request.material.contentText || '').trim())) {
     throw new Error(
@@ -1466,7 +1510,7 @@ export async function answerWithRag(options: {
     selectedMaterial: options.selectedMaterial,
     courseMaterials: options.courseMaterials,
     courseIds: options.courseIds,
-    maxChars: 10_000,
+    maxChars: options.mode === 'OFFLINE' ? 7_000 : 10_000,
   });
 
   const historyBlock =
@@ -1579,14 +1623,30 @@ export class AutoGemmaRouter {
       try {
         result = await this.completeOnline(prompt, resolvedSettings, style, systemPrompt);
       } catch (onlineError) {
-        if (model.connected) {
+        if (model.localPath) {
           try {
-            result = await this.local.complete(prompt, model, style, systemPrompt);
+            const offlineResult = await this.local.complete(prompt, model, style, systemPrompt);
+            const onlineMsg = onlineError instanceof Error ? onlineError.message : String(onlineError);
+            result = {
+              ...offlineResult,
+              providerName: `${offlineResult.providerName} [hybrid fallback after online failure]`,
+              // Keep a short breadcrumb for debugging without flooding the answer
+              text: offlineResult.text,
+            };
+            // Attach online failure detail only when offline also looks thin
+            if (offlineResult.text.length < 40) {
+              result = {
+                ...result,
+                text:
+                  `${offlineResult.text}\n\n(Note: online providers failed first: ${onlineMsg.slice(0, 280)})`,
+              };
+            }
           } catch (offlineError) {
             const onlineMsg = onlineError instanceof Error ? onlineError.message : String(onlineError);
             const offlineMsg = offlineError instanceof Error ? offlineError.message : String(offlineError);
             throw new Error(
-              `Hybrid mode failed.\n\nOnline error:\n${onlineMsg}\n\nOffline error:\n${offlineMsg}`,
+              `Hybrid mode failed — both online and offline paths errored.\n\n` +
+                `── Online ──\n${onlineMsg}\n\n── Offline ──\n${offlineMsg}`,
             );
           }
         } else {
@@ -1600,8 +1660,11 @@ export class AutoGemmaRouter {
       }
     }
 
-    cache[cacheKey] = result;
-    await persistCache(cache);
+    // Never cache empty/failure-like payloads
+    if ((result.text || '').trim().length >= 8) {
+      cache[cacheKey] = result;
+      await persistCache(cache);
+    }
     return result;
   }
 }
